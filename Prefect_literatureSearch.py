@@ -29,8 +29,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dateutil import parser as date_parser
 from prefect import flow, task, get_run_logger
+import google.generativeai as genai
+# ... other imports
+from dotenv import load_dotenv
+load_dotenv()  # This loads the variables from .env into os.environ
+# Configure Gemini
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-
+for k, v in os.environ.items():
+    print(k, v)
 # -------------------------
 # 1. CONFIG (n8n: Config / Config1)
 # -------------------------
