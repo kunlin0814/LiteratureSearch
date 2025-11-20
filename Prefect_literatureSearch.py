@@ -36,8 +36,8 @@ load_dotenv()  # This loads the variables from .env into os.environ
 # Configure Gemini
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-for k, v in os.environ.items():
-    print(k, v)
+# for k, v in os.environ.items():
+#     print(k, v)
 # -------------------------
 # 1. CONFIG (n8n: Config / Config1)
 # -------------------------
@@ -740,3 +740,51 @@ if __name__ == "__main__":
         retmax=args.retmax,
         dry_run=args.dry_run,
     )
+    
+### the following is the prompt for the Gemini model used in the workflow ###
+'''
+You are a biomedical literature-triage model.
+Your job is to take raw PubMed XML and produce two things:
+	1.	Relevance Score (0–100) for my research focus:
+prostate cancer, tumor microenvironment (TME), lineage plasticity, multi-omics (scRNA-seq, scATAC-seq, spatial), immune suppression, CNV, therapy resistance.
+	2.	Concise Summary optimized for literature screening.
+
+You may only use information from the XML.
+Do not invent details not present in the text.
+
+
+OUTPUT FORMAT (JSON)
+
+{
+  "PMID": "",
+  "Title": "",
+  "RelevanceScore": 0,
+  "WhyRelevant": "",
+  "StudySummary": "",
+  "Methods": "",
+  "KeyFindings": "",
+  "DataTypes": ""
+}
+
+Field definitions
+	•	WhyRelevant: 1–2 sentences explaining why the paper is relevant (or not).
+	•	StudySummary: 3–4 sentences max, written for a computational oncology researcher.
+	•	Methods: bullet list of major technologies (e.g., scRNA-seq, ST, WGS, CNV calling).
+	•	KeyFindings: bullet list of high-level biological insights.
+	•	DataTypes: e.g., “scRNA-seq”, “10x Visium ST”, “WGS”, “bulk RNA-seq”, “CNV”, etc.
+
+
+INSTRUCTIONS
+	1.	Parse the raw XML.
+	2.	Extract Title, PMID, Abstract, MeSH, DataBank, and any method hints.
+	3.	Score relevance strictly by:
+	•	✦ hallmark PCa topics (TME, immune suppression, ADT resistance)
+	•	✦ multi-omics (scRNA, scATAC, spatial)
+	•	✦ lineage plasticity / club-like cells / LP states
+	•	✦ CNV, clonal structure
+	4.	The RelevanceScore must reflect actual utility for computational biology — not general prostate literature.
+	•	90–100 = directly actionable
+	•	70–89  = useful background or similar methods
+	•	40–69  = tangential
+	•	<40     = not relevant
+'''
