@@ -314,9 +314,9 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
                     acc_list_elem = databank.find("AccessionNumberList")
                     if acc_list_elem is not None:
                         accs = [acc.text.strip() for acc in acc_list_elem.findall("AccessionNumber") if acc.text]
-                        if db_name == "GEO":
+                        if db_name.upper() == "GEO":
                             geo_accessions.update(accs)
-                        elif db_name == "SRA":
+                        elif db_name.upper() == "SRA":
                             sra_accessions.update(accs)
                 if geo_accessions:
                     geo_list = ", ".join(sorted(geo_accessions))
