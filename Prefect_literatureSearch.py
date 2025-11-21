@@ -287,9 +287,18 @@ def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], to
 
 
 @task(retries=2, retry_delay_seconds=10)
-def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], total: int) -> Dict[str, Optional[str]]:
+def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], total: int) -> Dict[str, Dict[str, Optional[str]]]:
     """
-    Return {pmid -> abstract} parsed from efetch XML using history pagination.
+    Return {pmid -> dict with abstract and additional fields} parsed from efetch XML using history pagination.
+    Each entry contains:
+        {
+            "Abstract": ...,
+            "GEO_List": ...,
+            "SRA_Project": ...,
+            "MeshHeadingList": ...,
+            "MeSH_Terms": ...,
+            "Major_MeSH": ...,
+        }
     """
     import xml.etree.ElementTree as ET
 
@@ -303,7 +312,7 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
     session = _make_session()
     batch = int(cfg.get("EUTILS_BATCH", 200))
-    abstracts: Dict[str, Optional[str]] = {}
+    efetch_map: Dict[str, Dict[str, Optional[str]]] = {}
 
     for start in range(0, total, batch):
         params = {
@@ -333,12 +342,75 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
             pmid = pmid_elem.text.strip() if pmid_elem is not None else None
             if not pmid:
                 continue
+            # Abstract
             abst_elems = art.findall(".//AbstractText")
             abstract = " ".join((e.text or "").strip() for e in abst_elems if e.text) or None
-            abstracts[pmid] = abstract
+
+            # --- Extract GEO and SRA ---
+            geo_list = ""
+            sra_project = ""
+            data_bank_list_elem = art.find(".//DataBankList")
+            if data_bank_list_elem is not None:
+                geo_accessions = set()
+                sra_accessions = set()
+                for databank in data_bank_list_elem.findall(".//DataBank"):
+                    db_name_elem = databank.find("DataBankName")
+                    db_name = db_name_elem.text.strip() if db_name_elem is not None and db_name_elem.text else ""
+                    acc_list_elem = databank.find("AccessionNumberList")
+                    if acc_list_elem is not None:
+                        accs = [acc.text.strip() for acc in acc_list_elem.findall("AccessionNumber") if acc.text]
+                        if db_name == "GEO":
+                            geo_accessions.update(accs)
+                        elif db_name == "SRA":
+                            sra_accessions.update(accs)
+                if geo_accessions:
+                    geo_list = ", ".join(sorted(geo_accessions))
+                if sra_accessions:
+                    sra_project = ", ".join(sorted(sra_accessions))
+
+            # --- Extract MeSH ---
+            mesh_heading_list = ""
+            mesh_terms = ""
+            major_mesh = ""
+            mesh_heading_entries = []
+            mesh_terms_set = set()
+            major_mesh_set = set()
+            mesh_heading_list_elem = art.find(".//MeshHeadingList")
+            if mesh_heading_list_elem is not None:
+                for mesh_heading in mesh_heading_list_elem.findall("MeshHeading"):
+                    desc_elem = mesh_heading.find("DescriptorName")
+                    if desc_elem is None or desc_elem.text is None:
+                        continue
+                    desc_text = desc_elem.text.strip()
+                    major_topic_yn = desc_elem.attrib.get("MajorTopicYN", "N")
+                    qualifiers = [q.text.strip() for q in mesh_heading.findall("QualifierName") if q.text]
+                    # Build entry string
+                    if qualifiers:
+                        entry = f"{desc_text} ({', '.join(qualifiers)})"
+                    else:
+                        entry = desc_text
+                    mesh_heading_entries.append(entry)
+                    mesh_terms_set.add(desc_text)
+                    if major_topic_yn == "Y":
+                        major_mesh_set.add(desc_text)
+                if mesh_heading_entries:
+                    mesh_heading_list = "; ".join(mesh_heading_entries)
+                if mesh_terms_set:
+                    mesh_terms = "; ".join(sorted(mesh_terms_set))
+                if major_mesh_set:
+                    major_mesh = "; ".join(sorted(major_mesh_set))
+
+            efetch_map[pmid] = {
+                "Abstract": abstract,
+                "GEO_List": geo_list,
+                "SRA_Project": sra_project,
+                "MeshHeadingList": mesh_heading_list,
+                "MeSH_Terms": mesh_terms,
+                "Major_MeSH": major_mesh,
+            }
         time.sleep(0.34)
 
-    return abstracts
+    return efetch_map
 
 
 # -------------------------
@@ -356,7 +428,9 @@ def normalize_records(
     - Normalize + Parse
 
     Output: list of dicts with keys:
-        Title, Journal, PubDate, DOI, PMID, URL, Abstract, DedupeKey
+        Title, Journal, PubDate, DOI, PMID, URL, Abstract, DedupeKey, Authors, GEO_List, SRA_Project, MeshHeadingList, MeSH_Terms, Major_MeSH
+    The Authors field is a string of author names (if available), otherwise None.
+    New fields default to empty string when not present.
     """
     logger = get_run_logger()
     records: Dict[str, Dict[str, Any]] = {}
@@ -375,6 +449,16 @@ def normalize_records(
                 if id_obj.get("idtype") == "doi":
                     doi = id_obj.get("value")
                     break
+            # Publication Types
+            pub_types = []
+            for pt in rec.get("pubtype", []):
+                if pt:
+                    pub_types.append(pt.strip())
+            # Determine if review
+            is_review = any(
+                ("review" in pt.lower()) or ("meta-analysis" in pt.lower())
+                for pt in pub_types
+            )
             # robust date parsing
             pubdate = None
             if pubdate_raw:
@@ -382,6 +466,22 @@ def normalize_records(
                     pubdate = date_parser.parse(pubdate_raw, default=datetime(1900, 1, 1)).date()
                 except Exception:
                     pubdate = None
+
+            # Authors extraction
+            authors_list = rec.get("authors", [])
+            author_names = []
+            for author in authors_list:
+                name = author.get("name")
+                if name:
+                    author_names.append(name)
+                else:
+                    # Fallback to lastname + firstname if available
+                    lastname = author.get("lastname")
+                    firstname = author.get("firstname")
+                    combined = " ".join(filter(None, [lastname, firstname]))
+                    if combined:
+                        author_names.append(combined)
+            authors_str = ", ".join(author_names) if author_names else None
 
             records[pmid] = {
                 "PMID": pmid,
@@ -392,11 +492,34 @@ def normalize_records(
                 "DOI": doi,
                 "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                 "Abstract": None,  # filled from efetch
+                "Authors": authors_str,
+                "GEO_List": "",
+                "SRA_Project": "",
+                "MeshHeadingList": "",
+                "MeSH_Terms": "",
+                "Major_MeSH": "",
+                "IsReview": "Yes" if is_review else "No",
+                "PublicationTypes": "; ".join(pub_types),
             }
 
     # ---- from eFetch (abstracts map) ----
     if isinstance(efetch_data, dict) and efetch_data:
-        for pmid, abstract in efetch_data.items():
+        for pmid, entry in efetch_data.items():
+            if isinstance(entry, dict):
+                abstract = entry.get("Abstract")
+                geo_list = entry.get("GEO_List", "")
+                sra_project = entry.get("SRA_Project", "")
+                mesh_heading_list = entry.get("MeshHeadingList", "")
+                mesh_terms = entry.get("MeSH_Terms", "")
+                major_mesh = entry.get("Major_MeSH", "")
+            else:
+                # fallback: old format (abstract string)
+                abstract = entry
+                geo_list = ""
+                sra_project = ""
+                mesh_heading_list = ""
+                mesh_terms = ""
+                major_mesh = ""
             if pmid not in records:
                 records[pmid] = {
                     "PMID": pmid,
@@ -407,9 +530,22 @@ def normalize_records(
                     "DOI": None,
                     "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                     "Abstract": abstract,
+                    "Authors": None,
+                    "GEO_List": geo_list,
+                    "SRA_Project": sra_project,
+                    "MeshHeadingList": mesh_heading_list,
+                    "MeSH_Terms": mesh_terms,
+                    "Major_MeSH": major_mesh,
+                    "IsReview": "No",
+                    "PublicationTypes": "",
                 }
             else:
                 records[pmid]["Abstract"] = abstract
+                records[pmid]["GEO_List"] = geo_list
+                records[pmid]["SRA_Project"] = sra_project
+                records[pmid]["MeshHeadingList"] = mesh_heading_list
+                records[pmid]["MeSH_Terms"] = mesh_terms
+                records[pmid]["Major_MeSH"] = major_mesh
 
     # Compute DedupeKey (n8n: DOI or PMID)
     out: List[Dict[str, Any]] = []
@@ -486,7 +622,7 @@ def notion_build_index(cfg: Dict[str, Any]) -> Dict[str, str]:
         for page in data.get("results", []):
             props = page.get("properties", {})
             # ASSUMPTION: property is named "Dedupe Key" and is rich_text
-            dedupe_prop = props.get("Dedupe Key")
+            dedupe_prop = props.get("DedupeKey")
             if dedupe_prop and dedupe_prop.get("rich_text"):
                 text = "".join(t["plain_text"] for t in dedupe_prop["rich_text"])
                 if text:
@@ -544,9 +680,28 @@ def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     url = rec.get("URL")
     journal = rec.get("Journal")
     pubdate = rec.get("PubDateParsed")
+    authors = rec.get("Authors")
+    abstract = rec.get("Abstract")
+    geo_list = rec.get("GEO_List", "")
+    sra_project = rec.get("SRA_Project", "")
+    mesh_heading_list = rec.get("MeshHeadingList", "")
+    mesh_terms = rec.get("MeSH_Terms", "")
+    major_mesh = rec.get("Major_MeSH", "")
+
+    # Prepare MeSH terms as lists for Notion multi_select
+    # Notion multi_select option names cannot contain commas, so we replace ',' with '·'
+    mesh_terms_list = []
+    if mesh_terms:
+        raw_terms = [t.strip() for t in mesh_terms.split(";") if t.strip()]
+        mesh_terms_list = [term.replace(",", " -") for term in raw_terms]
+
+    major_mesh_list = []
+    if major_mesh:
+        raw_major = [t.strip() for t in major_mesh.split(";") if t.strip()]
+        major_mesh_list = [term.replace(",", " -") for term in raw_major]
 
     props = {
-        "Title": {
+        "Title": {  # <- your real title property name
             "title": [
                 {"text": {"content": title or "Untitled"}}
             ]
@@ -569,16 +724,58 @@ def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
                 {"text": {"content": journal}} if journal else {}
             ] if journal else [],
         },
-        "Dedupe Key": {
+        "Abstract": {
+            "rich_text": [
+                {"text": {"content": abstract}} if abstract else {}
+            ] if abstract else [],
+        },
+        "Authors": {
+            "rich_text": [
+                {"text": {"content": authors}} if authors else {}
+            ] if authors else [],
+        },
+        "GEO_List": {
+            "rich_text": [
+                {"text": {"content": geo_list}} if geo_list else {}
+            ] if geo_list else [],
+        },
+        "SRA_Project": {
+            "rich_text": [
+                {"text": {"content": sra_project}} if sra_project else {}
+            ] if sra_project else [],
+        },
+        "MeshHeadingList": {
+            "rich_text": [
+                {"text": {"content": mesh_heading_list}} if mesh_heading_list else {}
+            ] if mesh_heading_list else [],
+        },
+        "MeSH_Terms": {
+            "multi_select": [
+                {"name": t} for t in mesh_terms_list
+            ] if mesh_terms_list else [],
+        },
+        "Major_MeSH": {
+            "multi_select": [
+                {"name": t} for t in major_mesh_list
+            ] if major_mesh_list else [],
+        },
+        "DedupeKey": {   # <- match your actual property name
             "rich_text": [
                 {"text": {"content": rec.get("DedupeKey", "")}}
             ],
         },
-        "Last Checked": {
+        "LastChecked": {  # <- match your actual property name
             "date": {"start": datetime.utcnow().isoformat()},
         },
-        "Status": {
-            "select": {"name": "Checked"},
+        "IsReview": {
+            "rich_text": [
+                {"text": {"content": rec.get("IsReview", "")}}
+            ] if rec.get("IsReview") else [],
+        },
+        "PublicationTypes": {
+            "rich_text": [
+                {"text": {"content": rec.get("PublicationTypes", "")}}
+            ] if rec.get("PublicationTypes") else [],
         },
     }
 
@@ -692,15 +889,16 @@ def literature_search_flow(
 
     esearch_out = pubmed_esearch(cfg)
     validation = validate_results(esearch_out, cfg)
-
+    
     count = validation["validation"]["count"]
+    total = min(count, cfg["RETMAX"])
     if count == 0:
         logger.info("No results from PubMed; stopping flow.")
         return
 
     # Pull all results using history
-    esummary_json = pubmed_esummary_history(cfg, esearch_out, count)
-    abstracts_map = pubmed_efetch_abstracts_history(cfg, esearch_out, count)
+    esummary_json = pubmed_esummary_history(cfg, esearch_out, total)
+    abstracts_map = pubmed_efetch_abstracts_history(cfg, esearch_out, total)
     records = normalize_records(esummary_json, abstracts_map)
 
     if not records:
