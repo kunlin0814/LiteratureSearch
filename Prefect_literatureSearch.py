@@ -16,11 +16,13 @@ You will need:
 - PREFECT 2.x/3.x installed
 - `requests` installed
 - Environment variables:
-    NCBI_API_KEY, NCBI_EMAIL, NOTION_TOKEN, NOTION_DB_ID
+    NCBI_API_KEY, NCBI_EMAIL, NOTION_TOKEN, NOTION_DB_ID, GOOGLE_API_KEY
 """
 
 import os
 import time
+import json
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Dict, Tuple, Any, Optional
 
@@ -30,16 +32,16 @@ from urllib3.util.retry import Retry
 from dateutil import parser as date_parser
 from prefect import flow, task, get_run_logger
 import google.generativeai as genai
-# ... other imports
 from dotenv import load_dotenv
+
 load_dotenv()  # This loads the variables from .env into os.environ
+
 # Configure Gemini
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
-# for k, v in os.environ.items():
-#     print(k, v)
+
 # -------------------------
-# 1. CONFIG (n8n: Config / Config1)
+# 1. CONFIG & UTILS
 # -------------------------
 
 def _make_session(max_retries: int = 5, backoff_factor: float = 1.0) -> requests.Session:
@@ -64,6 +66,38 @@ def _make_session(max_retries: int = 5, backoff_factor: float = 1.0) -> requests
     return session
 
 
+def _sanitize_xml_for_gemini(xml_text: str) -> str:
+    """
+    Remove unnecessary XML elements to reduce token costs and noise.
+    Strips AuthorList and ReferenceList which aren't needed for AI analysis.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+        # Remove author lists (we already have this from eSummary)
+        for author_list in root.findall(".//AuthorList"):
+            parent = root.find(".//*[AuthorList]")
+            if parent is not None:
+                parent.remove(author_list)
+        # Remove reference lists (not needed for triage)
+        for ref_list in root.findall(".//ReferenceList"):
+            parent = root.find(".//*[ReferenceList]")
+            if parent is not None:
+                parent.remove(ref_list)
+        return ET.tostring(root, encoding="unicode")
+    except Exception:
+        # If sanitization fails, return original
+        return xml_text
+
+
+def _truncate(text: Optional[str], limit: int = 2000) -> str:
+    """Safe truncation to avoid Notion API 400 errors."""
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 @task
 def get_config(
     query_term: Optional[str] = None,
@@ -73,7 +107,6 @@ def get_config(
 ) -> Dict[str, Any]:
     """
     Equivalent to the n8n Config nodes.
-    Adjust QUERY_TERM and defaults as needed.
     """
     base_query = (
         '("Prostatic Neoplasms"[MeSH Terms] OR prostat*[tiab] OR "prostate cancer"[tiab]) '
@@ -85,24 +118,17 @@ def get_config(
         "QUERY_TERM": query_term or base_query,
         "RETMAX": int(retmax) if retmax is not None else 200,
         "RELDATE_DAYS": int(rel_date_days) if rel_date_days is not None else 365,
-        # Always use environment variables; no hardcoded defaults
         "NCBI_API_KEY": os.environ.get("NCBI_API_KEY", ""),
         "EMAIL": os.environ.get("NCBI_EMAIL", ""),
-        # pdat (publication date) or edat (Entrez date)
         "DATETYPE": os.environ.get("NCBI_DATETYPE", "pdat"),
-        # simple QA thresholds (mirrors Validate Results)
         "HISTORICAL_MEDIAN": 500,
         "GOLD_SET": [
-            # Known identifiers you expect (PMID or DOI)
-            "39550375",  # PMID
-            "10.1038/s41467-024-54364-1",  # DOI
+            "39550375",  # Example PMID
+            "10.1038/s41467-024-54364-1",  # Example DOI
         ],
-        # Notion
         "NOTION_TOKEN": os.environ.get("NOTION_TOKEN", ""),
         "NOTION_DB_ID": os.environ.get("NOTION_DB_ID", ""),
-        # behaviour
         "DRY_RUN": bool(dry_run) if dry_run is not None else False,
-        # internal knobs
         "EUTILS_BATCH": 200,
         "EUTILS_TOOL": "prefect-litsearch",
     }
@@ -110,7 +136,7 @@ def get_config(
 
 
 # -------------------------
-# 2. PubMed eSearch (n8n: PubMed eSearch / PubMed eSearch1)
+# 2. PubMed eSearch
 # -------------------------
 
 @task(retries=2, retry_delay_seconds=10)
@@ -144,19 +170,15 @@ def pubmed_esearch(cfg: Dict[str, Any]) -> Dict[str, Any]:
     query_key = result.get("querykey")
 
     logger.info(f"ESearch count={count}, ids(first_page)={len(ids)}")
-    return {"count": count, "ids": ids, "webenv": webenv, "query_key": query_key, "raw": data}
+    return {"count": count, "ids": ids, "webenv": webenv, "query_key": query_key}
 
 
 # -------------------------
-# 3. Validate Results (n8n: Validate Results)
+# 3. Validate Results
 # -------------------------
 
 @task
 def validate_results(esearch_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mirrors the logic of the n8n `Validate Results` JS code.
-    Very simple: check count thresholds and gold hits.
-    """
     logger = get_run_logger()
     count = esearch_out["count"]
     ids = esearch_out["ids"]
@@ -173,11 +195,7 @@ def validate_results(esearch_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     if count == 0 or count < drop_threshold or count > jump_threshold or gold_missing:
         status = "ALERT"
 
-    logger.info(
-        f"Validation → count={count}, "
-        f"drop_thr={drop_threshold}, jump_thr={jump_threshold}, "
-        f"gold_missing={gold_missing}, status={status}"
-    )
+    logger.info(f"Validation → count={count}, gold_missing={gold_missing}, status={status}")
 
     return {
         "validation": {
@@ -190,58 +208,9 @@ def validate_results(esearch_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
 
 
 # -------------------------
-# 4. PubMed eSummary + eFetch (n8n: PubMed eSummary, PubMed eFetch)
+# 4. PubMed eSummary + eFetch
 # -------------------------
 
-@task(retries=2, retry_delay_seconds=10)
-def pubmed_esummary(cfg: Dict[str, Any], ids: List[str]) -> Dict[str, Any]:
-    logger = get_run_logger()
-    if not ids:
-        logger.info("No IDs for eSummary; skipping.")
-        return {}
-
-    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    params = {
-        "db": "pubmed",
-        "retmode": "json",
-        "id": ",".join(ids),
-        "email": cfg["EMAIL"],
-        "api_key": cfg["NCBI_API_KEY"],
-    }
-
-    logger.info(f"ESummary → {len(ids)} IDs")
-    resp = _make_session().get(base_url, params=params, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
-
-
-@task(retries=2, retry_delay_seconds=10)
-def pubmed_efetch(cfg: Dict[str, Any], ids: List[str]) -> str:
-    """
-    Return raw XML as string.
-    Mirrors PubMed eFetch (Abstracts) node.
-    """
-    logger = get_run_logger()
-    if not ids:
-        logger.info("No IDs for eFetch; skipping.")
-        return ""
-
-    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    params = {
-        "db": "pubmed",
-        "retmode": "xml",
-        "id": ",".join(ids),
-        "email": cfg["EMAIL"],
-        "api_key": cfg["NCBI_API_KEY"],
-    }
-
-    logger.info(f"EFetch → {len(ids)} IDs")
-    resp = _make_session().get(base_url, params=params, timeout=60)
-    resp.raise_for_status()
-    return resp.text
-
-
-# Batched via E-Utilities history (recommended for large result sets)
 @task(retries=2, retry_delay_seconds=10)
 def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], total: int) -> Dict[str, Any]:
     logger = get_run_logger()
@@ -275,10 +244,9 @@ def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], to
         res = js.get("result", {})
         for k, v in res.items():
             if k == "uids":
-                # We'll re-compute uids later if needed
                 continue
             merged.setdefault("result", {})[k] = v
-        time.sleep(0.34)  # be polite to NCBI
+        time.sleep(0.34)
 
     # add uids array for completeness
     uids = [k for k in merged["result"].keys() if k.isdigit()]
@@ -288,20 +256,6 @@ def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], to
 
 @task(retries=2, retry_delay_seconds=10)
 def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], total: int) -> Dict[str, Dict[str, Optional[str]]]:
-    """
-    Return {pmid -> dict with abstract and additional fields} parsed from efetch XML using history pagination.
-    Each entry contains:
-        {
-            "Abstract": ...,
-            "GEO_List": ...,
-            "SRA_Project": ...,
-            "MeshHeadingList": ...,
-            "MeSH_Terms": ...,
-            "Major_MeSH": ...,
-        }
-    """
-    import xml.etree.ElementTree as ET
-
     logger = get_run_logger()
     webenv = esearch_out.get("webenv")
     query_key = esearch_out.get("query_key")
@@ -333,7 +287,6 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError:
-            # try to wrap if needed (rare)
             xml_text_wrapped = f"<PubmedArticleSet>{xml_text}</PubmedArticleSet>"
             root = ET.fromstring(xml_text_wrapped)
 
@@ -342,6 +295,8 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
             pmid = pmid_elem.text.strip() if pmid_elem is not None else None
             if not pmid:
                 continue
+            # serialize this article as XML for Gemini enrichment
+            article_xml = ET.tostring(art, encoding="unicode")
             # Abstract
             abst_elems = art.findall(".//AbstractText")
             abstract = " ".join((e.text or "").strip() for e in abst_elems if e.text) or None
@@ -384,7 +339,6 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
                     desc_text = desc_elem.text.strip()
                     major_topic_yn = desc_elem.attrib.get("MajorTopicYN", "N")
                     qualifiers = [q.text.strip() for q in mesh_heading.findall("QualifierName") if q.text]
-                    # Build entry string
                     if qualifiers:
                         entry = f"{desc_text} ({', '.join(qualifiers)})"
                     else:
@@ -407,6 +361,7 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
                 "MeshHeadingList": mesh_heading_list,
                 "MeSH_Terms": mesh_terms,
                 "Major_MeSH": major_mesh,
+                "RawXML": article_xml,
             }
         time.sleep(0.34)
 
@@ -414,7 +369,7 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
 
 
 # -------------------------
-# 5. Normalize + Format Date + Parse (n8n: Normalize + Format Date, Normalize + Parse)
+# 5. Normalize + Parse
 # -------------------------
 
 @task
@@ -422,16 +377,6 @@ def normalize_records(
     esummary_json: Dict[str, Any],
     efetch_data: Any,
 ) -> List[Dict[str, Any]]:
-    """
-    Rough equivalent of the two code nodes:
-    - Normalize + Format Date
-    - Normalize + Parse
-
-    Output: list of dicts with keys:
-        Title, Journal, PubDate, DOI, PMID, URL, Abstract, DedupeKey, Authors, GEO_List, SRA_Project, MeshHeadingList, MeSH_Terms, Major_MeSH
-    The Authors field is a string of author names (if available), otherwise None.
-    New fields default to empty string when not present.
-    """
     logger = get_run_logger()
     records: Dict[str, Dict[str, Any]] = {}
 
@@ -449,17 +394,14 @@ def normalize_records(
                 if id_obj.get("idtype") == "doi":
                     doi = id_obj.get("value")
                     break
-            # Publication Types
             pub_types = []
             for pt in rec.get("pubtype", []):
                 if pt:
                     pub_types.append(pt.strip())
-            # Determine if review
             is_review = any(
                 ("review" in pt.lower()) or ("meta-analysis" in pt.lower())
                 for pt in pub_types
             )
-            # robust date parsing
             pubdate = None
             if pubdate_raw:
                 try:
@@ -467,7 +409,6 @@ def normalize_records(
                 except Exception:
                     pubdate = None
 
-            # Authors extraction
             authors_list = rec.get("authors", [])
             author_names = []
             for author in authors_list:
@@ -475,7 +416,6 @@ def normalize_records(
                 if name:
                     author_names.append(name)
                 else:
-                    # Fallback to lastname + firstname if available
                     lastname = author.get("lastname")
                     firstname = author.get("firstname")
                     combined = " ".join(filter(None, [lastname, firstname]))
@@ -491,7 +431,7 @@ def normalize_records(
                 "PubDateParsed": pubdate,
                 "DOI": doi,
                 "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                "Abstract": None,  # filled from efetch
+                "Abstract": None,
                 "Authors": authors_str,
                 "GEO_List": "",
                 "SRA_Project": "",
@@ -513,7 +453,6 @@ def normalize_records(
                 mesh_terms = entry.get("MeSH_Terms", "")
                 major_mesh = entry.get("Major_MeSH", "")
             else:
-                # fallback: old format (abstract string)
                 abstract = entry
                 geo_list = ""
                 sra_project = ""
@@ -547,7 +486,6 @@ def normalize_records(
                 records[pmid]["MeSH_Terms"] = mesh_terms
                 records[pmid]["Major_MeSH"] = major_mesh
 
-    # Compute DedupeKey (n8n: DOI or PMID)
     out: List[Dict[str, Any]] = []
     for pmid, rec in records.items():
         doi = rec.get("DOI")
@@ -559,13 +497,143 @@ def normalize_records(
     return out
 
 
-# Additional validation using normalized records for GOLD_SET (DOI or PMID)
+# -------------------------
+# 6. Gemini Enrichment (Native JSON Mode)
+# -------------------------
+
+@task(retries=3, retry_delay_seconds=5)
+def gemini_enrich_records(
+    records: List[Dict[str, Any]],
+    efetch_data: Dict[str, Dict[str, Optional[str]]],
+) -> List[Dict[str, Any]]:
+    logger = get_run_logger()
+
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        logger.warning("GOOGLE_API_KEY not set; skipping Gemini enrichment.")
+        return records
+
+    # Schema definition
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "RelevanceScore": {"type": "INTEGER"},
+            "WhyRelevant": {"type": "STRING"},
+            "StudySummary": {"type": "STRING"},
+            "Methods": {"type": "STRING"},
+            "KeyFindings": {"type": "STRING"},
+            "DataTypes": {"type": "STRING"}
+        },
+        "required": ["RelevanceScore", "WhyRelevant", "Methods", "DataTypes"]
+    }
+
+    SYSTEM_INSTRUCTION = """You are a PhD-level Bioinformatics curator specializing in Spatial and Single-cell Biology and Prostate Cancer.
+
+Your task: Analyze the provided PubMed XML and extract structured insights.
+
+CONTEXT:
+The user creates a database of papers related to:
+1. Prostate Cancer (PCa), TME, Lineage Plasticity, NEPC.
+2. Multi-omics (scRNA-seq, scATAC-seq, Spatial Transcriptomics/Proteomics).
+3. Computational methods for integrating the above.
+
+SCORING RUBRIC (RelevanceScore):
+- 90-100: DIRECT HIT. PCa + Spatial/Single-cell + Novel computational method or major biological finding.
+- 70-89: RELEVANT. PCa context but standard methods, OR General Spatial/Single-cell method applicable to PCa.
+- 40-69: TANGENTIAL. General cancer genomics, bulk sequencing, or clinical reviews without deep molecular focus.
+- 0-39: IRRELEVANT.
+
+INSTRUCTIONS:
+1. StudySummary: Write for a computational scientist. Focus on the *data generated* and *algorithms used*. Max 3 sentences.
+2. DataTypes: Be specific. Use standard terms: "10x Visium", "Xenium", "snATAC-seq", "GeoMx", "H&E". Use comma-separated lowercase.
+3. KeyFindings: Extract biologically significant claims regarding tumor heterogeneity or resistance mechanisms.
+4. Methods: A concise, semicolon-separated list of major algorithms and technologies (e.g., 'Seurat v5; Cell2Location; ArchR').
+
+OUTPUT:
+Return JSON only matching the provided schema. No markdown, no conversation."""
+
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=SYSTEM_INSTRUCTION,
+            generation_config={
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+                "response_schema": response_schema,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Model init failed: {e}")
+        return records
+
+    KNOWN_DATA_TYPES = {
+        "scrna-seq", "scatac-seq", "spatial transcriptomics", "10x visium",
+        "xenium", "cosmx", "geomx", "slide-seq", "h&e", "wgs", "wes",
+        "bulk rna-seq", "chip-seq", "atac-seq", "cite-seq", "multiome",
+        "cnv", "snrna-seq", "snatac-seq", "merfish", "seqfish"
+    }
+
+    enriched: List[Dict[str, Any]] = []
+    
+    for rec in records:
+        pmid = str(rec.get("PMID", "")).strip()
+        entry = efetch_data.get(pmid, {})
+        xml_text = entry.get("RawXML")
+        
+        if not pmid or not xml_text:
+            enriched.append(rec)
+            continue
+
+        try:
+            xml_text = _sanitize_xml_for_gemini(xml_text)
+            prompt = f"Analyze this PubMed XML for PMID {pmid}:\n\n{xml_text}"
+            resp = model.generate_content(prompt)
+            data = json.loads(resp.text)
+
+            data_types_raw = data.get("DataTypes", "")
+            if data_types_raw:
+                raw_types = [t.strip().lower() for t in data_types_raw.replace(";", ",").split(",") if t.strip()]
+                normalized_types = []
+                for dt in raw_types:
+                    matched = False
+                    for known in KNOWN_DATA_TYPES:
+                        if known in dt or dt in known:
+                            normalized_types.append(known)
+                            matched = True
+                            break
+                    if not matched:
+                        normalized_types.append(dt)
+                data["DataTypes"] = ", ".join(list(dict.fromkeys(normalized_types)))
+
+            rec.update({
+                "RelevanceScore": data.get("RelevanceScore", 0),
+                "WhyRelevant": data.get("WhyRelevant", ""),
+                "StudySummary": data.get("StudySummary", ""),
+                "Methods": data.get("Methods", ""),
+                "KeyFindings": data.get("KeyFindings", ""),
+                "DataTypes": data.get("DataTypes", "")
+            })
+            
+            time.sleep(1) # Rate limiting
+            
+        except Exception as e:
+            logger.warning(f"Gemini enrichment failed for PMID={pmid}: {e}")
+            rec["WhyRelevant"] = "Error during AI enrichment"
+            
+        enriched.append(rec)
+
+    return enriched
+
+
+# -------------------------
+# 7. Gold Validation
+# -------------------------
+
 @task
 def validate_goldset(records: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, Any]:
     logger = get_run_logger()
     gold = set(str(x).strip() for x in cfg.get("GOLD_SET", []) if str(x).strip())
     if not gold:
-        logger.info("No GOLD_SET provided; skipping gold validation.")
         return {"goldMissing": False, "missing": []}
 
     seen: set = set()
@@ -583,18 +651,73 @@ def validate_goldset(records: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict
 
 
 # -------------------------
-# 6. Notion: Get All Pages + Build Index (n8n: Notion: Get All Pages, Build Index)
+# 8. Notion Utils
 # -------------------------
+
+def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
+    title = rec.get("Title") or rec.get("PMID")
+    doi = rec.get("DOI")
+    pmid = rec.get("PMID")
+    url = rec.get("URL")
+    journal = rec.get("Journal")
+    pubdate = rec.get("PubDateParsed")
+    authors = rec.get("Authors")
+    abstract = rec.get("Abstract")
+    geo_list = rec.get("GEO_List", "")
+    sra_project = rec.get("SRA_Project", "")
+    mesh_heading_list = rec.get("MeshHeadingList", "")
+    mesh_terms = rec.get("MeSH_Terms", "")
+    major_mesh = rec.get("Major_MeSH", "")
+    study_summary = rec.get("StudySummary", "")
+    why_relevant = rec.get("WhyRelevant", "")
+    methods = rec.get("Methods", "")
+    key_findings = rec.get("KeyFindings", "")
+    data_types = rec.get("DataTypes", "")
+    relevance_score = rec.get("RelevanceScore", 0)
+
+    mesh_terms_list = [t.strip().replace(",", " -") for t in mesh_terms.split(";") if t.strip()] if mesh_terms else []
+    major_mesh_list = [t.strip().replace(",", " -") for t in major_mesh.split(";") if t.strip()] if major_mesh else []
+    data_types_list = [t.strip().replace(",", " -") for t in data_types.replace(";", ",").split(",") if t.strip()] if data_types else []
+
+    props: Dict[str, Any] = {
+        "Title": {"title": [{"text": {"content": title or "Untitled"}}]},
+        "DOI": {"rich_text": ([{"text": {"content": _truncate(doi)}}] if doi else [])},
+        "PMID": {"rich_text": ([{"text": {"content": _truncate(pmid)}}] if pmid else [])},
+        "URL": {"url": url},
+        "Journal": {"rich_text": ([{"text": {"content": _truncate(journal)}}] if journal else [])},
+        "Abstract": {"rich_text": ([{"text": {"content": _truncate(abstract)}}] if abstract else [])},
+        "Authors": {"rich_text": ([{"text": {"content": _truncate(authors)}}] if authors else [])},
+        "GEO_List": {"rich_text": ([{"text": {"content": _truncate(geo_list)}}] if geo_list else [])},
+        "SRA_Project": {"rich_text": ([{"text": {"content": _truncate(sra_project)}}] if sra_project else [])},
+        "MeshHeadingList": {"rich_text": ([{"text": {"content": _truncate(mesh_heading_list)}}] if mesh_heading_list else [])},
+        "MeSH_Terms": {"multi_select": ([{"name": t} for t in mesh_terms_list] if mesh_terms_list else [])},
+        "Major_MeSH": {"multi_select": ([{"name": t} for t in major_mesh_list] if major_mesh_list else [])},
+        "StudySummary": {"rich_text": ([{"text": {"content": _truncate(study_summary)}}] if study_summary else [])},
+        "WhyRelevant": {"rich_text": ([{"text": {"content": _truncate(why_relevant)}}] if why_relevant else [])},
+        "Methods": {"rich_text": ([{"text": {"content": _truncate(methods)}}] if methods else [])},
+        "KeyFindings": {"rich_text": ([{"text": {"content": _truncate(key_findings)}}] if key_findings else [])},
+        "DataTypes": {"multi_select": ([{"name": dt} for dt in data_types_list] if data_types_list else [])},
+        "RelevanceScore": {"number": relevance_score},
+        "DedupeKey": {"rich_text": [{"text": {"content": _truncate(rec.get("DedupeKey", ""))}}]},
+        "LastChecked": {"date": {"start": datetime.utcnow().isoformat()}},
+        "IsReview": {"rich_text": ([{"text": {"content": _truncate(rec.get("IsReview", ""))}}] if rec.get("IsReview") else [])},
+        "PublicationTypes": {"rich_text": ([{"text": {"content": _truncate(rec.get("PublicationTypes", ""))}}] if rec.get("PublicationTypes") else [])},
+    }
+
+    if pubdate:
+        props["PubDate"] = {"date": {"start": pubdate.isoformat()}}
+
+    # Remove empty rich_text blocks
+    for k in list(props.keys()):
+        v = props[k]
+        if isinstance(v, dict) and "rich_text" in v and not v["rich_text"]:
+            props.pop(k)
+
+    return props
+
 
 @task(retries=2, retry_delay_seconds=10)
 def notion_build_index(cfg: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Fetch all pages from the Notion database and build:
-        { DedupeKey -> page_id }
-    Mirrors:
-      - Notion: Get All Pages
-      - Build Index {DedupeKey→page_id}
-    """
     logger = get_run_logger()
     token = cfg["NOTION_TOKEN"]
     db_id = cfg["NOTION_DB_ID"]
@@ -621,7 +744,6 @@ def notion_build_index(cfg: Dict[str, Any]) -> Dict[str, str]:
 
         for page in data.get("results", []):
             props = page.get("properties", {})
-            # ASSUMPTION: property is named "Dedupe Key" and is rich_text
             dedupe_prop = props.get("DedupeKey")
             if dedupe_prop and dedupe_prop.get("rich_text"):
                 text = "".join(t["plain_text"] for t in dedupe_prop["rich_text"])
@@ -635,20 +757,11 @@ def notion_build_index(cfg: Dict[str, Any]) -> Dict[str, str]:
     return index
 
 
-# -------------------------
-# 7. Classify: create vs update (n8n: Classify: create vs update)
-# -------------------------
-
 @task
 def classify_records(
     records: List[Dict[str, Any]],
     index: Dict[str, str],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Split into:
-        to_create: no existing page
-        to_update: existing page (with attached page_id)
-    """
     to_create = []
     to_update = []
 
@@ -665,133 +778,6 @@ def classify_records(
     return to_create, to_update
 
 
-# -------------------------
-# 8. Notion Create / Update (n8n: Notion: Create Page, Notion: Update Page)
-# -------------------------
-
-def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Map normalized record → Notion properties.
-    Adjust property names to your DB schema.
-    """
-    title = rec.get("Title") or rec.get("PMID")
-    doi = rec.get("DOI")
-    pmid = rec.get("PMID")
-    url = rec.get("URL")
-    journal = rec.get("Journal")
-    pubdate = rec.get("PubDateParsed")
-    authors = rec.get("Authors")
-    abstract = rec.get("Abstract")
-    geo_list = rec.get("GEO_List", "")
-    sra_project = rec.get("SRA_Project", "")
-    mesh_heading_list = rec.get("MeshHeadingList", "")
-    mesh_terms = rec.get("MeSH_Terms", "")
-    major_mesh = rec.get("Major_MeSH", "")
-
-    # Prepare MeSH terms as lists for Notion multi_select
-    # Notion multi_select option names cannot contain commas, so we replace ',' with '·'
-    mesh_terms_list = []
-    if mesh_terms:
-        raw_terms = [t.strip() for t in mesh_terms.split(";") if t.strip()]
-        mesh_terms_list = [term.replace(",", " -") for term in raw_terms]
-
-    major_mesh_list = []
-    if major_mesh:
-        raw_major = [t.strip() for t in major_mesh.split(";") if t.strip()]
-        major_mesh_list = [term.replace(",", " -") for term in raw_major]
-
-    props = {
-        "Title": {  # <- your real title property name
-            "title": [
-                {"text": {"content": title or "Untitled"}}
-            ]
-        },
-        "DOI": {
-            "rich_text": [
-                {"text": {"content": doi}} if doi else {}
-            ] if doi else [],
-        },
-        "PMID": {
-            "rich_text": [
-                {"text": {"content": pmid}} if pmid else {}
-            ] if pmid else [],
-        },
-        "URL": {
-            "url": url,
-        },
-        "Journal": {
-            "rich_text": [
-                {"text": {"content": journal}} if journal else {}
-            ] if journal else [],
-        },
-        "Abstract": {
-            "rich_text": [
-                {"text": {"content": abstract}} if abstract else {}
-            ] if abstract else [],
-        },
-        "Authors": {
-            "rich_text": [
-                {"text": {"content": authors}} if authors else {}
-            ] if authors else [],
-        },
-        "GEO_List": {
-            "rich_text": [
-                {"text": {"content": geo_list}} if geo_list else {}
-            ] if geo_list else [],
-        },
-        "SRA_Project": {
-            "rich_text": [
-                {"text": {"content": sra_project}} if sra_project else {}
-            ] if sra_project else [],
-        },
-        "MeshHeadingList": {
-            "rich_text": [
-                {"text": {"content": mesh_heading_list}} if mesh_heading_list else {}
-            ] if mesh_heading_list else [],
-        },
-        "MeSH_Terms": {
-            "multi_select": [
-                {"name": t} for t in mesh_terms_list
-            ] if mesh_terms_list else [],
-        },
-        "Major_MeSH": {
-            "multi_select": [
-                {"name": t} for t in major_mesh_list
-            ] if major_mesh_list else [],
-        },
-        "DedupeKey": {   # <- match your actual property name
-            "rich_text": [
-                {"text": {"content": rec.get("DedupeKey", "")}}
-            ],
-        },
-        "LastChecked": {  # <- match your actual property name
-            "date": {"start": datetime.utcnow().isoformat()},
-        },
-        "IsReview": {
-            "rich_text": [
-                {"text": {"content": rec.get("IsReview", "")}}
-            ] if rec.get("IsReview") else [],
-        },
-        "PublicationTypes": {
-            "rich_text": [
-                {"text": {"content": rec.get("PublicationTypes", "")}}
-            ] if rec.get("PublicationTypes") else [],
-        },
-    }
-
-    if pubdate:
-        props["PubDate"] = {
-            "date": {"start": pubdate.isoformat()}
-        }
-
-    # Clean empty rich_text props
-    for k, v in list(props.items()):
-        if "rich_text" in v and not v["rich_text"]:
-            props.pop(k)
-
-    return props
-
-
 @task(retries=2, retry_delay_seconds=10)
 def notion_create_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> Dict[str, int]:
     logger = get_run_logger()
@@ -803,7 +789,7 @@ def notion_create_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
     db_id = cfg["NOTION_DB_ID"]
     if not token or not db_id:
         logger.warning("Notion token or DB ID missing; skipping create.")
-        return {"created": 0} 
+        return {"created": 0}
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -816,16 +802,13 @@ def notion_create_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
 
     for rec in records:
         props = _notion_page_properties_from_record(rec)
-        payload = {
-            "parent": {"database_id": db_id},
-            "properties": props,
-        }
+        payload = {"parent": {"database_id": db_id}, "properties": props}
         resp = session.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code >= 300:
             logger.warning(f"Create failed for PMID={rec.get('PMID')}: {resp.text}")
         else:
             created += 1
-        # gentle rate limit
+        
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", "1"))
             time.sleep(retry_after)
@@ -854,17 +837,18 @@ def notion_update_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
     session = _make_session()
     updated = 0
     for rec in records:
-        page_id = rec["page_id"]
+        page_id = rec.get("page_id")
+        if not page_id:
+            continue
         props = _notion_page_properties_from_record(rec)
         url = f"https://api.notion.com/v1/pages/{page_id}"
         payload = {"properties": props}
         resp = session.patch(url, headers=headers, json=payload, timeout=30)
         if resp.status_code >= 300:
-            logger.warning(
-                f"Update failed for page_id={page_id}, PMID={rec.get('PMID')}: {resp.text}"
-            )
+            logger.warning(f"Update failed for page_id={page_id}, PMID={rec.get('PMID')}: {resp.text}")
         else:
             updated += 1
+        
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", "1"))
             time.sleep(retry_after)
@@ -874,7 +858,7 @@ def notion_update_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
 
 
 # -------------------------
-# MAIN FLOW (n8n graph orchestration)
+# MAIN FLOW
 # -------------------------
 
 @flow(name="LiteratureSearch-Prefect")
@@ -896,7 +880,6 @@ def literature_search_flow(
         logger.info("No results from PubMed; stopping flow.")
         return
 
-    # Pull all results using history
     esummary_json = pubmed_esummary_history(cfg, esearch_out, total)
     abstracts_map = pubmed_efetch_abstracts_history(cfg, esearch_out, total)
     records = normalize_records(esummary_json, abstracts_map)
@@ -911,10 +894,17 @@ def literature_search_flow(
 
     index = notion_build_index(cfg)
     to_create, to_update = classify_records(records, index)
+    
+    if not to_create:
+        logger.info("No new papers to create. Skipping Gemini enrichment and stopping.")
+        return
+    
+    logger.info(f"Running Gemini enrichment on {len(to_create)} new papers...")
+    to_create = gemini_enrich_records(to_create, abstracts_map)
+    
     create_res = notion_create_pages(cfg, to_create)
     update_res = notion_update_pages(cfg, to_update)
 
-    # Final summary
     logger.info(
         f"Summary → total={count}, normalized={len(records)}, "
         f"to_create={len(to_create)}, to_update={len(to_update)}, "
@@ -938,7 +928,6 @@ if __name__ == "__main__":
         retmax=args.retmax,
         dry_run=args.dry_run,
     )
-    
 ### the following is the prompt for the Gemini model used in the workflow ###
 '''
 You are a biomedical literature-triage model.
