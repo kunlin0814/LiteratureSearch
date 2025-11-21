@@ -112,7 +112,7 @@ def get_config(
         '("Prostatic Neoplasms"[MeSH Terms] OR prostat*[tiab] OR "prostate cancer"[tiab]) '
         'AND ("spatial transcriptomics"[tw] OR "spatial multiomics"[tw] OR Visium[tw] OR \
         Xenium[tw] OR CosMX[tw] OR GeoMx[tw] OR "Slide-seq"[tw] OR scRNA[tw] OR "single-cell"[tw] \
-        OR scATAC[tw] OR ATAC-seq[tw] OR multiome[tw] OR CNV[tw] OR pseudotime[tw])'
+        OR scATAC[tw] OR ATAC-seq[tw] OR multiome[tw] OR spatial spatial-ATAC OR pseudotime[tw])'
     )
     cfg = {
         "QUERY_TERM": query_term or base_query,
@@ -123,8 +123,8 @@ def get_config(
         "DATETYPE": os.environ.get("NCBI_DATETYPE", "pdat"),
         "HISTORICAL_MEDIAN": 500,
         "GOLD_SET": [
-            "39550375",  # Example PMID
-            "10.1038/s41467-024-54364-1",  # Example DOI
+            "41082386",  # Example PMID
+            "10.1111/cas.70220",  # Example DOI
         ],
         "NOTION_TOKEN": os.environ.get("NOTION_TOKEN", ""),
         "NOTION_DB_ID": os.environ.get("NOTION_DB_ID", ""),
