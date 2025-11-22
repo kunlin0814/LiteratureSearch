@@ -112,7 +112,7 @@ def get_config(
         '("Prostatic Neoplasms"[MeSH Terms] OR prostat*[tiab] OR "prostate cancer"[tiab]) '
         'AND ("spatial transcriptomics"[tw] OR "spatial multiomics"[tw] OR Visium[tw] OR \
         Xenium[tw] OR CosMX[tw] OR GeoMx[tw] OR "Slide-seq"[tw] OR scRNA[tw] OR "single-cell"[tw] \
-        OR scATAC[tw] OR ATAC-seq[tw] OR multiome[tw] OR spatial spatial-ATAC OR pseudotime[tw])'
+        OR scATAC[tw] OR ATAC-seq[tw] OR multiome[tw] OR spatial-ATAC OR pseudotime[tw])'
     )
     cfg = {
         "QUERY_TERM": query_term or base_query,
@@ -123,8 +123,8 @@ def get_config(
         "DATETYPE": os.environ.get("NCBI_DATETYPE", "pdat"),
         "HISTORICAL_MEDIAN": 500,
         "GOLD_SET": [
-            "41082386",  # Example PMID
-            "10.1111/cas.70220",  # Example DOI
+            "40119005",  # Example PMID
+            "10.1038/s41596-025-01145-9.",  # Example DOI
         ],
         "NOTION_TOKEN": os.environ.get("NOTION_TOKEN", ""),
         "NOTION_DB_ID": os.environ.get("NOTION_DB_ID", ""),
@@ -527,30 +527,67 @@ def gemini_enrich_records(
         "required": ["RelevanceScore", "WhyRelevant", "Methods", "DataTypes"]
     }
 
-    SYSTEM_INSTRUCTION = """You are a PhD-level Bioinformatics curator specializing in Spatial and Single-cell Biology and Prostate Cancer.
+    SYSTEM_INSTRUCTION = """You are a PhD-level bioinformatics curator specializing in cancer biology, spatial and single-cell technologies, and computational methods.
 
-Your task: Analyze the provided PubMed XML and extract structured insights.
+Your task: Analyze the provided PubMed XML and extract structured insights for an automated literature database.
 
 CONTEXT:
-The user creates a database of papers related to:
-1. Prostate Cancer (PCa), TME, Lineage Plasticity, NEPC.
-2. Multi-omics (scRNA-seq, scATAC-seq, Spatial Transcriptomics/Proteomics).
-3. Computational methods for integrating the above.
+The database is built from two types of queries:
+1. Tier 1: Prostate cancer / prostatic neoplasms + advanced technologies (spatial transcriptomics, spatial ATAC, scRNA-seq, scATAC-seq, multiome).
+2. Tier 2: Broader cancers (solid tumors and hematologic malignancies) that use similar advanced technologies or computational methods.
+Because of this query design, most articles will be at least partially relevant by technology or cancer context.
 
-SCORING RUBRIC (RelevanceScore):
-- 90-100: DIRECT HIT. PCa + Spatial/Single-cell + Novel computational method or major biological finding.
-- 70-89: RELEVANT. PCa context but standard methods, OR General Spatial/Single-cell method applicable to PCa.
-- 40-69: TANGENTIAL. General cancer genomics, bulk sequencing, or clinical reviews without deep molecular focus.
-- 0-39: IRRELEVANT.
+SCORING RUBRIC (RelevanceScore, 0–100):
+Think in terms of BOTH tumor type AND technology/methods.
 
-INSTRUCTIONS:
-1. StudySummary: Write for a computational scientist. Focus on the *data generated* and *algorithms used*. Max 3 sentences.
-2. DataTypes: Be specific. Use standard terms: "10x Visium", "Xenium", "snATAC-seq", "GeoMx", "H&E". Use comma-separated lowercase.
-3. KeyFindings: Extract biologically significant claims regarding tumor heterogeneity or resistance mechanisms.
-4. Methods: A concise, semicolon-separated list of major algorithms and technologies (e.g., 'Seurat v5; Cell2Location; ArchR').
+- 90–100: DIRECT HIT.
+  • Cancer focus clearly includes prostate cancer or a very closely related context (e.g., GU tumors or strong prostate-relevant biology),
+    AND
+  • Uses advanced single-cell / spatial / multiomic technologies (e.g., scRNA-seq, scATAC-seq, snRNA-seq, spatial transcriptomics, multiome),
+    OR presents a clearly useful computational method for these data types.
+- 70–89: STRONGLY RELEVANT BY TECHNOLOGY OR BIOLOGY.
+  • Any cancer type (breast, lung, colon, etc.) but with high-quality single-cell/spatial/multiomic methods or computational tools that are directly reusable for prostate projects,
+    OR
+  • Prostate cancer with more standard omics methods but still informative for TME, lineage plasticity, CNV, or therapy resistance.
+- 40–69: METHOD-LEVEL OR TANGENTIAL RELEVANCE.
+  • General cancer or non-cancer biology but with methods, pipelines, or analyses that could still be applied to single-cell/spatial/multiomic studies (e.g., generic trajectory inference, clustering, CNV-from-scRNA),
+    OR
+  • Cancer papers with weak or indirect connection to the main themes (no deep molecular / single-cell angle).
+- 0–39: EFFECTIVELY IRRELEVANT.
+  • Does not focus on cancer, tumor microenvironment, or relevant omics technologies,
+  • OR is mostly about unrelated clinical topics, devices, or social/epidemiologic issues with no computational genomics component.
+This should be rare given the query, but still allowed.
+
+INSTRUCTIONS FOR FIELDS:
+1. StudySummary:
+   - Write for a computational scientist.
+   - Focus on the *data generated* (modalities, scale, cohorts) and the *analytical or computational methods used*.
+   - Max 3 sentences.
+2. DataTypes:
+   - Be specific and concise.
+   - Use standard, lowercase, comma-separated terms where possible, e.g.:
+     "10x visium", "xenium", "cosmx", "geomx", "scrna-seq", "snrna-seq", "scatac-seq", "snatac-seq",
+     "multiome", "wgs", "wes", "bulk rna-seq", "cnv", "h&e".
+3. KeyFindings:
+   - Extract biologically significant claims, with emphasis on:
+     • tumor heterogeneity and clonal structure,
+     • tumor microenvironment and immune suppression,
+     • lineage plasticity / phenotype switching,
+     • treatment or resistance mechanisms.
+   - Keep it concise but information-dense.
+4. Methods:
+   - Provide a concise, semicolon-separated list of major experimental and computational methods, e.g.:
+     "10x visium; scrna-seq; scatac-seq; seurat; scanpy; archr; monocle3; cell2location".
+   - Include both technologies (Visium, Xenium, GeoMx, etc.) and key software/algorithms when explicitly mentioned.
+5. WhyRelevant:
+   - Explicitly state *why* the paper is useful for this database in 1–2 sentences.
+   - Mention both tumor context (e.g., prostate vs. breast vs. pan-cancer) and technology/method relevance.
+   - If relevance is mainly method-level (e.g., new trajectory algorithm or CNV-calling pipeline), say so clearly.
 
 OUTPUT:
-Return JSON only matching the provided schema. No markdown, no conversation."""
+Return JSON only matching the provided schema the user defined:
+{ "RelevanceScore": int, "WhyRelevant": str, "StudySummary": str, "Methods": str, "KeyFindings": str, "DataTypes": str }.
+No markdown, no extra keys, no conversation."""
 
     try:
         model = genai.GenerativeModel(
@@ -567,7 +604,7 @@ Return JSON only matching the provided schema. No markdown, no conversation."""
         return records
 
     KNOWN_DATA_TYPES = {
-        "scrna-seq", "scatac-seq", "spatial transcriptomics", "10x visium",
+        "scrna-seq", "scatac-seq", "scdna","spatial transcriptomics", "10x visium",
         "xenium", "cosmx", "geomx", "slide-seq", "h&e", "wgs", "wes",
         "bulk rna-seq", "chip-seq", "atac-seq", "cite-seq", "multiome",
         "cnv", "snrna-seq", "snatac-seq", "merfish", "seqfish"
@@ -917,8 +954,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run LiteratureSearch Prefect flow")
     parser.add_argument("--query", dest="query_term", type=str, default=None)
-    parser.add_argument("--reldays", dest="rel_date_days", type=int, default=None)
-    parser.add_argument("--retmax", dest="retmax", type=int, default=None)
+    parser.add_argument("--reldays", dest="rel_date_days", type=int, default=1095)
+    parser.add_argument("--retmax", dest="retmax", type=int, default=200)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
     args = parser.parse_args()
 
