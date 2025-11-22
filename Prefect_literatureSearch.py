@@ -64,29 +64,6 @@ def _make_session(max_retries: int = 5, backoff_factor: float = 1.0) -> requests
     return session
 
 
-def _sanitize_xml_for_gemini(xml_text: str) -> str:
-    """
-    Remove unnecessary XML elements to reduce token costs and noise.
-    Strips AuthorList and ReferenceList which aren't needed for AI analysis.
-    """
-    try:
-        root = ET.fromstring(xml_text)
-        # Remove author lists (we already have this from eSummary)
-        for author_list in root.findall(".//AuthorList"):
-            parent = root.find(".//*[AuthorList]")
-            if parent is not None:
-                parent.remove(author_list)
-        # Remove reference lists (not needed for triage)
-        for ref_list in root.findall(".//ReferenceList"):
-            parent = root.find(".//*[ReferenceList]")
-            if parent is not None:
-                parent.remove(ref_list)
-        return ET.tostring(root, encoding="unicode")
-    except Exception:
-        # If sanitization fails, return original
-        return xml_text
-
-
 def _truncate(text: Optional[str], limit: int = 2000) -> str:
     """Safe truncation to avoid Notion API 400 errors."""
     if not text:
@@ -107,7 +84,7 @@ def get_config(
     """
     Equivalent to the n8n Config nodes.
     """
-        # Tiered default queries
+    # Tiered default queries
 
     # Tier 1: prostate-focused, high precision
     tier1_query = """
@@ -118,7 +95,7 @@ def get_config(
     AND
     ("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab] 
     OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab] 
-    OR Visium[tiab] OR Xenium[tiab] 
+    OR Visium[tiab] OR Xenium[tiab] OR CosMx[tiab] OR GeoMx[tiab]
     OR "Slide-seq"[tiab] OR "SlideSeq"[tiab] 
     OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab] 
     OR "single-cell"[tiab] OR "single cell"[tiab] 
@@ -127,49 +104,49 @@ def get_config(
     OR multiome[tiab] OR "10x multiome"[tiab] 
     OR pseudotime[tiab] OR "trajectory inference"[tiab] OR "RNA velocity"[tiab])
     AND ("Journal Article"[pt] 
-	NOT "Review"[pt] 
-	NOT "Editorial"[pt] 
-	NOT "Comment"[pt] 
-	NOT "Letter"[pt] 
-	NOT "News"[pt] 
-	NOT "Case Reports"[pt])
+    NOT "Review"[pt] 
+    NOT "Editorial"[pt] 
+    NOT "Comment"[pt] 
+    NOT "Letter"[pt] 
+    NOT "News"[pt] 
+    NOT "Case Reports"[pt])
     AND english[la]
     NOT "Preprint"[Publication Type]
 """
 
     # Tier 2: broader cancer, method/technology-oriented
     tier2_query = """
-	("Neoplasms"[MeSH Terms]
-	OR cancer[tiab]
-	OR cancers[tiab]
-	OR carcinoma[tiab]
-	OR carcinomas[tiab]
-	OR tumor[tiab]
-	OR tumors[tiab]
-	OR malignan*[tiab])
-	AND
-	("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab]
-	OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab]
-	OR Visium[tiab] OR Xenium[tiab] OR CosMX[tiab] OR GeoMx[tiab]
-	OR "Slide-seq"[tiab] OR "SlideSeq"[tiab]
-	OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab]
-	OR "single-cell"[tiab] OR "single cell"[tiab]
-	OR "single-nucleus"[tiab] OR "single nucleus"[tiab]
-	OR scRNA*[tiab] OR snRNA*[tiab] OR scATAC*[tiab] OR snATAC*[tiab]
-	OR multiome[tiab] OR "10x multiome"[tiab]
-	OR pseudotime[tiab] OR "trajectory inference"[tiab] OR "RNA velocity"[tiab])
- 	AND (
-	"Journal Article"[pt] 
-	NOT "Review"[pt] 
-	NOT "Editorial"[pt] 
-	NOT "Comment"[pt] 
-	NOT "Letter"[pt] 
-	NOT "News"[pt] 
-	NOT "Case Reports"[pt]
-	)
+    ("Neoplasms"[MeSH Terms]
+    OR cancer[tiab]
+    OR cancers[tiab]
+    OR carcinoma[tiab]
+    OR carcinomas[tiab]
+    OR tumor[tiab]
+    OR tumors[tiab]
+    OR malignan*[tiab])
+    AND
+    ("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab] 
+    OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab] 
+    OR Visium[tiab] OR Xenium[tiab] OR CosMX[tiab] OR GeoMx[tiab] 
+    OR "Slide-seq"[tiab] OR "SlideSeq"[tiab] 
+    OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab] 
+    OR "single-cell"[tiab] OR "single cell"[tiab] 
+    OR "single-nucleus"[tiab] OR "single nucleus"[tiab] 
+    OR scRNA*[tiab] OR snRNA*[tiab] OR scATAC*[tiab] OR snATAC*[tiab] 
+    OR multiome[tiab] OR "10x multiome"[tiab] 
+    OR pseudotime[tiab] OR "trajectory inference"[tiab] OR "RNA velocity"[tiab])
+    AND (
+    "Journal Article"[pt] 
+    NOT "Review"[pt] 
+    NOT "Editorial"[pt] 
+    NOT "Comment"[pt] 
+    NOT "Letter"[pt] 
+    NOT "News"[pt] 
+    NOT "Case Reports"[pt]
+    )
     AND english[la]
- 	NOT "Preprint"[Publication Type]
-"""
+    NOT "Preprint"[Publication Type]
+    """
 
     # Choose query: explicit > tiered defaults
     if query_term:
@@ -239,6 +216,67 @@ def pubmed_esearch(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------
+# 2.5 PMC Full Text Retrieval
+# -------------------------
+
+def _extract_pmc_sections(xml_text: str) -> str:
+    """
+    Parses PMC XML to extract Abstract, Methods, and Results.
+    Discards Introduction, Discussion, References to save tokens.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+        
+        # 1. Abstract
+        abstract_parts = []
+        for abst in root.findall(".//abstract"):
+            for p in abst.findall(".//p"):
+                if p.text:
+                    abstract_parts.append(p.text.strip())
+        abstract_text = " ".join(abstract_parts)
+
+        # 2. Body Sections
+        methods_text = []
+        results_text = []
+        
+        # Iterate over all sections in the body
+        data_code_text = []
+        
+        for sec in root.findall(".//sec"):
+            title_elem = sec.find("title")
+            title = title_elem.text.lower() if (title_elem is not None and title_elem.text) else ""
+            sec_type = sec.attrib.get("sec-type", "").lower()
+            
+            # Get all text in this section
+            # (naive: itertext)
+            full_sec_text = "".join(sec.itertext()).strip()
+            if not full_sec_text:
+                continue
+                
+            if "methods" in title or "methods" in sec_type:
+                methods_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Methods'} ---\n{full_sec_text}")
+            elif "results" in title or "results" in sec_type:
+                results_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Results'} ---\n{full_sec_text}")
+            elif "data availability" in title or "code availability" in title or "availability" in title:
+                data_code_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Availability'} ---\n{full_sec_text}")
+
+        # Combine
+        final_parts = []
+        if abstract_text:
+            final_parts.append(f"ABSTRACT:\n{abstract_text}")
+        if methods_text:
+            final_parts.append(f"METHODS:\n" + "\n\n".join(methods_text))
+        if results_text:
+            final_parts.append(f"RESULTS:\n" + "\n\n".join(results_text))
+        if data_code_text:
+            final_parts.append(f"DATA & CODE AVAILABILITY:\n" + "\n\n".join(data_code_text))
+            
+        return "\n\n".join(final_parts)
+    except Exception as e:
+        return f"Error parsing XML: {str(e)}"
+
+
+# -------------------------
 # 3. Validate Results
 # -------------------------
 
@@ -276,47 +314,234 @@ def validate_results(esearch_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
 # 4. PubMed eSummary + eFetch
 # -------------------------
 
+
 @task(retries=2, retry_delay_seconds=10)
-def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], total: int) -> Dict[str, Any]:
+def pubmed_esummary_history(cfg: Dict[str, Any], esearch_out: Dict[str, Any], batch_size: int, start_offset: int = 0) -> Dict[str, Any]:
+    """Fetch eSummary data using WebEnv/query_key history."""
     logger = get_run_logger()
     webenv = esearch_out.get("webenv")
     query_key = esearch_out.get("query_key")
-    if not webenv or not query_key or total == 0:
-        logger.info("No history context; skipping esummary history.")
+    if not webenv or not query_key:
+        logger.info("No history context; skipping esummary.")
         return {}
 
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     session = _make_session()
-    batch = int(cfg.get("EUTILS_BATCH", 200))
-    merged: Dict[str, Any] = {"result": {}}
+    
+    params = {
+        "db": "pubmed",
+        "retmode": "json",
+        "retstart": start_offset,
+        "retmax": batch_size,
+        "query_key": query_key,
+        "WebEnv": webenv,
+        "email": cfg["EMAIL"],
+        "api_key": cfg["NCBI_API_KEY"],
+        "tool": cfg.get("EUTILS_TOOL", "prefect-litsearch"),
+    }
+    logger.info(f"ESummary batch start={start_offset} size={batch_size}")
+    resp = session.get(base_url, params=params, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
 
-    for start in range(0, total, batch):
+
+@task(retries=2, retry_delay_seconds=10)
+def pubmed_efetch_abstracts_by_ids(cfg: Dict[str, Any], pmids: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
+    logger = get_run_logger()
+    if not pmids:
+        return {}
+
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    session = _make_session()
+    batch_size = int(cfg.get("EUTILS_BATCH", 200))
+    efetch_map: Dict[str, Dict[str, Optional[str]]] = {}
+
+    for i in range(0, len(pmids), batch_size):
+        batch = pmids[i:i+batch_size]
         params = {
             "db": "pubmed",
-            "retmode": "json",
-            "retstart": start,
-            "retmax": batch,
-            "query_key": query_key,
-            "WebEnv": webenv,
+            "retmode": "xml",
+            "id": ",".join(batch),
             "email": cfg["EMAIL"],
             "api_key": cfg["NCBI_API_KEY"],
             "tool": cfg.get("EUTILS_TOOL", "prefect-litsearch"),
         }
-        logger.info(f"ESummary batch start={start} size={batch}")
+        logger.info(f"EFetch (IDs) batch start={i} size={len(batch)}")
         resp = session.get(base_url, params=params, timeout=60)
         resp.raise_for_status()
-        js = resp.json()
-        res = js.get("result", {})
-        for k, v in res.items():
-            if k == "uids":
-                continue
-            merged.setdefault("result", {})[k] = v
-        time.sleep(0.34)
+        xml_text = resp.text
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            xml_text_wrapped = f"<PubmedArticleSet>{xml_text}</PubmedArticleSet>"
+            root = ET.fromstring(xml_text_wrapped)
 
-    # add uids array for completeness
-    uids = [k for k in merged["result"].keys() if k.isdigit()]
-    merged["result"]["uids"] = uids
-    return merged
+        for art in root.findall(".//PubmedArticle"):
+            pmid_elem = art.find(".//PMID")
+            pmid = pmid_elem.text.strip() if pmid_elem is not None else None
+            if not pmid:
+                continue
+            # serialize this article as XML for Gemini enrichment
+            article_xml = ET.tostring(art, encoding="unicode")
+            # Abstract
+            abst_elems = art.findall(".//AbstractText")
+            abstract = " ".join((e.text or "").strip() for e in abst_elems if e.text) or None
+
+            # Extract PMCID if present in ArticleIdList
+            pmcid = None
+            for aid in art.findall(".//ArticleId"):
+                if aid.attrib.get("IdType") == "pmc":
+                    pmcid = aid.text.strip()
+                    break
+
+            # --- Extract GEO and SRA from DataBankList and ReferenceList ---
+            geo_accessions = set()
+            sra_accessions = set()
+            
+            # Method 1: DataBankList (structured metadata)
+            data_bank_list_elem = art.find(".//DataBankList")
+            if data_bank_list_elem is not None:
+                for databank in data_bank_list_elem.findall(".//DataBank"):
+                    db_name_elem = databank.find("DataBankName")
+                    db_name = db_name_elem.text.strip() if db_name_elem is not None and db_name_elem.text else ""
+                    acc_list_elem = databank.find("AccessionNumberList")
+                    if acc_list_elem is not None:
+                        accs = [acc.text.strip() for acc in acc_list_elem.findall("AccessionNumber") if acc.text]
+                        if db_name.upper() == "GEO":
+                            geo_accessions.update(accs)
+                        elif db_name.upper() == "SRA":
+                            sra_accessions.update(accs)
+            
+            # Method 2: ReferenceList (fallback for papers that cite data as references)
+            # Many newer papers include GEO/SRA accessions in reference citations
+            # Note: ReferenceList is under PubmedData, not MedlineCitation, so we search from parent
+            import re
+            # Get the parent PubmedArticle element to access PubmedData/ReferenceList
+            # Since we're iterating through PubmedArticle elements, we can search within them
+            ref_list_elem = None
+            # Try to find ReferenceList - could be at different nesting levels
+            for possible_ref_list in [art.find(".//ReferenceList"), art.find("../PubmedData/ReferenceList" if hasattr(art, 'find') else None)]:
+                if possible_ref_list is not None:
+                    ref_list_elem = possible_ref_list
+                    break
+            
+            # If still not found, try getting it from the article XML directly
+            if ref_list_elem is None:
+                # Parse the full article as string to find ReferenceList anywhere
+                article_str = ET.tostring(art, encoding='unicode')
+                if '<ReferenceList>' in article_str:
+                    # Create a temporary element to parse the full article structure
+                    temp_root = ET.fromstring(f'<temp>{article_str}</temp>')
+                    ref_list_elem = temp_root.find('.//ReferenceList')
+            
+            if ref_list_elem is not None:
+                for ref in ref_list_elem.findall('.//Reference'):
+                    citation_elem = ref.find('Citation')
+                    if citation_elem is not None:
+                        # Citation may have child elements like <i>, so use itertext() to get all text
+                        citation_text = ''.join(citation_elem.itertext())
+                        # Extract GEO accessions (GSE followed by digits)
+                        geo_matches = re.findall(r'GSE\d+', citation_text)
+                        geo_accessions.update(geo_matches)
+                        # Extract SRA/BioProject accessions
+                        sra_matches = re.findall(r'(?:PRJNA|SRP|SRR|SRX|SRS)\d+', citation_text)
+                        sra_accessions.update(sra_matches)
+            
+            geo_list = ", ".join(sorted(geo_accessions)) if geo_accessions else ""
+            sra_project = ", ".join(sorted(sra_accessions)) if sra_accessions else ""
+
+            # Metadata extraction (Mesh, etc) - reused logic could be refactored but keeping inline for safety
+            mesh_terms_set = set()
+            major_mesh_set = set()
+            mesh_heading_entries = []
+            mesh_terms = ""
+            major_mesh = ""
+
+            for mh in art.findall(".//MeshHeading"):
+                desc = mh.find("DescriptorName")
+                if desc is None: 
+                    continue
+                desc_text = desc.text
+                major_topic_yn = desc.attrib.get("MajorTopicYN", "N")
+
+                qualifiers = []
+                for q in mh.findall("QualifierName"):
+                    if q.text:
+                        qualifiers.append(q.text)
+                        if q.attrib.get("MajorTopicYN", "N") == "Y":
+                            major_topic_yn = "Y"
+
+                if qualifiers:
+                    entry = f"{desc_text} ({', '.join(qualifiers)})"
+                else:
+                    entry = desc_text
+                mesh_heading_entries.append(entry)
+                mesh_terms_set.add(desc_text)
+                if major_topic_yn == "Y":
+                    major_mesh_set.add(desc_text)
+
+            mesh_heading_list = "; ".join(mesh_heading_entries) if mesh_heading_entries else ""
+            if mesh_terms_set:
+                mesh_terms = "; ".join(sorted(mesh_terms_set))
+            if major_mesh_set:
+                major_mesh = "; ".join(sorted(major_mesh_set))
+
+            efetch_map[pmid] = {
+                "Abstract": abstract,
+                "ArticleXML": article_xml,
+                "PMCID": pmcid,
+                "GEO_List": geo_list,
+                "SRA_Project": sra_project,
+                "MeshHeadingList": mesh_heading_list,
+                "MeSH_Terms": mesh_terms,
+                "Major_MeSH": major_mesh,
+            }
+
+        time.sleep(0.5)
+
+    return efetch_map
+
+
+
+# -------------------------
+# 3. Validate Results
+# -------------------------
+
+@task
+def validate_results(esearch_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    logger = get_run_logger()
+    count = esearch_out["count"]
+    ids = esearch_out["ids"]
+
+    historical_median = cfg["HISTORICAL_MEDIAN"]
+    drop_threshold = historical_median * 0.5
+    jump_threshold = historical_median * 2
+
+    gold_set = set(cfg["GOLD_SET"])
+    found_gold = any(i in gold_set for i in ids)
+    gold_missing = bool(gold_set) and not found_gold
+
+    status = "OK"
+    if count == 0 or count < drop_threshold or count > jump_threshold or gold_missing:
+        status = "ALERT"
+
+    logger.info(f"Validation → count={count}, gold_missing={gold_missing}, status={status}")
+
+    return {
+        "validation": {
+            "count": count,
+            "ids": ids,
+            "goldMissing": gold_missing,
+            "status": status,
+        }
+    }
+
+
+# -------------------------
+# 4. PubMed eSummary + eFetch
+# -------------------------
+
+
 
 
 @task(retries=2, retry_delay_seconds=10)
@@ -338,7 +563,7 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
             "db": "pubmed",
             "retmode": "xml",
             "retstart": start,
-            "retmax": batch,
+            "retmax": min(batch, total - start),
             "query_key": query_key,
             "WebEnv": webenv,
             "email": cfg["EMAIL"],
@@ -365,6 +590,15 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
             # Abstract
             abst_elems = art.findall(".//AbstractText")
             abstract = " ".join((e.text or "").strip() for e in abst_elems if e.text) or None
+
+            # --- Extract PMCID ---
+            pmcid = None
+            article_id_list = art.find(".//ArticleIdList")
+            if article_id_list is not None:
+                for aid in article_id_list.findall("ArticleId"):
+                    if aid.attrib.get("IdType") == "pmc":
+                        pmcid = aid.text.strip()
+                        break
 
             # --- Extract GEO and SRA ---
             geo_list = ""
@@ -421,6 +655,7 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
 
             efetch_map[pmid] = {
                 "Abstract": abstract,
+                "PMCID": pmcid,
                 "GEO_List": geo_list,
                 "SRA_Project": sra_project,
                 "MeshHeadingList": mesh_heading_list,
@@ -431,6 +666,96 @@ def pubmed_efetch_abstracts_history(cfg: Dict[str, Any], esearch_out: Dict[str, 
         time.sleep(0.34)
 
     return efetch_map
+
+
+@task(retries=2, retry_delay_seconds=10)
+def fetch_pmc_fulltext(cfg: Dict[str, Any], efetch_map: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    1. Identify records with a PMCID.
+    2. Batch fetch full text XML from PMC.
+    3. Extract Abstract + Methods + Results.
+    Returns: {PMID: {"full_text": str, "pmcid": str, "used": bool}}
+    """
+    logger = get_run_logger()
+    
+    # Identify PMCIDs to fetch
+    pmid_to_pmcid = {}
+    pmcid_to_pmid = {}
+    
+    for pmid, data in efetch_map.items():
+        pmcid = data.get("PMCID")
+        if pmcid:
+            pmid_to_pmcid[pmid] = pmcid
+            pmcid_to_pmid[pmcid] = pmid
+            
+    if not pmcid_to_pmid:
+        logger.info("No PMCIDs found in this batch.")
+        return {}
+
+    pmcids = list(pmcid_to_pmid.keys())
+    logger.info(f"Found {len(pmcids)} PMC full-text candidates.")
+    
+    session = _make_session()
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    batch_size = 50 # Smaller batch for full text XML
+    
+    results = {}
+
+    for i in range(0, len(pmcids), batch_size):
+        batch = pmcids[i:i+batch_size]
+        # Strip 'PMC' prefix for efetch
+        batch_ids = [pid.replace("PMC", "") for pid in batch]
+        
+        params = {
+            "db": "pmc",
+            "retmode": "xml",
+            "id": ",".join(batch_ids),
+            "email": cfg["EMAIL"],
+            "api_key": cfg["NCBI_API_KEY"],
+        }
+        
+        try:
+            resp = session.get(base_url, params=params, timeout=120)
+            resp.raise_for_status()
+            
+            # Parse the big XML response
+            # It will contain multiple <article> nodes
+            root = ET.fromstring(resp.text)
+            
+            for article in root.findall(".//article"):
+                # Find the PMCID of this article to map back to PMID
+                # Usually in <front><article-meta><article-id pub-id-type="pmc">
+                this_pmcid = None
+                for aid in article.findall(".//article-id"):
+                    if aid.attrib.get("pub-id-type") in ["pmc", "pmcid"]:
+                        this_pmcid = aid.text.strip()
+                        if not this_pmcid.startswith("PMC"):
+                            this_pmcid = "PMC" + this_pmcid
+                        break
+                
+                if not this_pmcid or this_pmcid not in pmcid_to_pmid:
+                    # Fallback: try to find PMID?
+                    continue
+                
+                pmid = pmcid_to_pmid[this_pmcid]
+                
+                # Serialize to string to pass to our extractor
+                article_xml_str = ET.tostring(article, encoding="unicode")
+                extracted_text = _extract_pmc_sections(article_xml_str)
+                
+                results[pmid] = {
+                    "full_text": extracted_text,
+                    "pmcid": this_pmcid,
+                    "used": True
+                }
+                
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Error fetching PMC batch {i}: {e}")
+            
+    logger.info(f"Successfully extracted full text for {len(results)} articles.")
+    return results
 
 
 # -------------------------
@@ -463,10 +788,7 @@ def normalize_records(
             for pt in rec.get("pubtype", []):
                 if pt:
                     pub_types.append(pt.strip())
-            is_review = any(
-                ("review" in pt.lower()) or ("meta-analysis" in pt.lower())
-                for pt in pub_types
-            )
+
             pubdate = None
             if pubdate_raw:
                 try:
@@ -503,7 +825,6 @@ def normalize_records(
                 "MeshHeadingList": "",
                 "MeSH_Terms": "",
                 "Major_MeSH": "",
-                "IsReview": "Yes" if is_review else "No",
                 "PublicationTypes": "; ".join(pub_types),
             }
 
@@ -540,7 +861,6 @@ def normalize_records(
                     "MeshHeadingList": mesh_heading_list,
                     "MeSH_Terms": mesh_terms,
                     "Major_MeSH": major_mesh,
-                    "IsReview": "No",
                     "PublicationTypes": "",
                 }
             else:
@@ -570,6 +890,7 @@ def normalize_records(
 def gemini_enrich_records(
     records: List[Dict[str, Any]],
     efetch_data: Dict[str, Dict[str, Optional[str]]],
+    pmc_fulltext_map: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     logger = get_run_logger()
 
@@ -587,67 +908,46 @@ def gemini_enrich_records(
             "StudySummary": {"type": "STRING"},
             "Methods": {"type": "STRING"},
             "KeyFindings": {"type": "STRING"},
-            "DataTypes": {"type": "STRING"}
+            "DataTypes": {"type": "STRING"},
         },
-        "required": ["RelevanceScore", "WhyRelevant", "Methods", "DataTypes"]
+        "required": ["RelevanceScore", "WhyRelevant", "StudySummary", "Methods", "KeyFindings", "DataTypes"]
     }
 
     SYSTEM_INSTRUCTION = """You are a PhD-level bioinformatics curator specializing in cancer biology, spatial and single-cell technologies, and computational methods.
+You will be given the text of a scientific paper (Abstract, Methods, Results, and Data/Code Availability).
 
-Your task: Analyze the provided PubMed XML and extract structured insights for an automated literature database.
+Your task is to extract key information and assess the paper's relevance to a database of "Prostate Cancer + Spatial/Single-Cell/Multiomics" research.
 
-CONTEXT:
-The database is built from two types of queries:
-1. Tier 1: Prostate cancer / prostatic neoplasms + advanced technologies (spatial transcriptomics, spatial ATAC, scRNA-seq, scATAC-seq, multiome).
-2. Tier 2: Broader cancers (solid tumors and hematologic malignancies) that use similar advanced technologies or computational methods.
-Because of this query design, most articles will be at least partially relevant by technology or cancer context.
+FIELDS TO EXTRACT:
+1. RelevanceScore (0-100):
+   - 100: Directly uses spatial transcriptomics (Visium, Xenium, CosMx, etc.) or single-cell multiomics on PROSTATE cancer samples.
+   - 80-90: Prostate cancer scRNA-seq/snRNA-seq (no spatial) OR Spatial methods development (not prostate specific but highly relevant method).
+   - 50-70: Prostate cancer bulk sequencing, or general cancer spatial reviews.
+   - <50: Irrelevant (e.g., different organ, purely clinical without omics).
 
-SCORING RUBRIC (RelevanceScore, 0–100):
-Think in terms of BOTH tumor type AND technology/methods.
-
-- 90–100: DIRECT HIT.
-  • Cancer focus clearly includes prostate cancer or a very closely related context (e.g., GU tumors or strong prostate-relevant biology),
-    AND
-  • Uses advanced single-cell / spatial / multiomic technologies (e.g., scRNA-seq, scATAC-seq, snRNA-seq, spatial transcriptomics, multiome),
-    OR presents a clearly useful computational method for these data types.
-- 70–89: STRONGLY RELEVANT BY TECHNOLOGY OR BIOLOGY.
-  • Any cancer type (breast, lung, colon, etc.) but with high-quality single-cell/spatial/multiomic methods or computational tools that are directly reusable for prostate projects,
-    OR
-  • Prostate cancer with more standard omics methods but still informative for TME, lineage plasticity, CNV, or therapy resistance.
-- 40–69: METHOD-LEVEL OR TANGENTIAL RELEVANCE.
-  • General cancer or non-cancer biology but with methods, pipelines, or analyses that could still be applied to single-cell/spatial/multiomic studies (e.g., generic trajectory inference, clustering, CNV-from-scRNA),
-    OR
-  • Cancer papers with weak or indirect connection to the main themes (no deep molecular / single-cell angle).
-- 0–39: EFFECTIVELY IRRELEVANT.
-  • Does not focus on cancer, tumor microenvironment, or relevant omics technologies,
-  • OR is mostly about unrelated clinical topics, devices, or social/epidemiologic issues with no computational genomics component.
-This should be rare given the query, but still allowed.
-
-INSTRUCTIONS FOR FIELDS:
-1. StudySummary:
-   - Write for a computational scientist.
-   - Focus on the *data generated* (modalities, scale, cohorts) and the *analytical or computational methods used*.
-   - Max 3 sentences.
 2. DataTypes:
-   - Be specific and concise.
-   - Use standard, lowercase, comma-separated terms where possible, e.g.:
-     "10x visium", "xenium", "cosmx", "geomx", "scrna-seq", "snrna-seq", "scatac-seq", "snatac-seq",
-     "multiome", "wgs", "wes", "bulk rna-seq", "cnv", "h&e".
-3. KeyFindings:
-   - Extract biologically significant claims, with emphasis on:
-     • tumor heterogeneity and clonal structure,
-     • tumor microenvironment and immune suppression,
-     • lineage plasticity / phenotype switching,
-     • treatment or resistance mechanisms.
-   - Keep it concise but information-dense.
-4. Methods:
-   - Provide a concise, semicolon-separated list of major experimental and computational methods, e.g.:
-     "10x visium; scrna-seq; scatac-seq; seurat; scanpy; archr; monocle3; cell2location".
-   - Include both technologies (Visium, Xenium, GeoMx, etc.) and key software/algorithms when explicitly mentioned.
+   - Comma-separated list of specific technologies used.
+   - Examples: "10x Visium", "Xenium", "CosMx", "scRNA-seq", "snRNA-seq", "scATAC-seq", "Multiome", "Stereo-seq", "Slide-seq".
+   - Be specific.
+
+3. Methods:
+   - Concise summary (2-3 sentences) of the experimental and computational methods.
+
+4. KeyFindings:
+   - Concise summary (2-3 sentences) of the main biological or technical findings.
+
 5. WhyRelevant:
    - Explicitly state *why* the paper is useful for this database in 1–2 sentences.
    - Mention both tumor context (e.g., prostate vs. breast vs. pan-cancer) and technology/method relevance.
    - If relevance is mainly method-level (e.g., new trajectory algorithm or CNV-calling pipeline), say so clearly.
+
+6. StudySummary:
+   - Concise summary of the overall study.
+
+CRITICAL INSTRUCTIONS:
+- If the provided text is empty or contains NO abstract/methods/results (e.g., only a title), set RelevanceScore to 0 and write "No abstract or full text available" in WhyRelevant. Leave other fields empty.
+- CONSISTENCY CHECK: If you write that the paper is relevant in WhyRelevant, RelevanceScore MUST be > 0. Do not give a score of 0 if you say it is relevant.
+- Do not leave StudySummary or KeyFindings empty unless there is absolutely no text to analyze.
 
 OUTPUT:
 Return JSON only matching the provided schema the user defined:
@@ -679,48 +979,104 @@ No markdown, no extra keys, no conversation."""
     
     for rec in records:
         pmid = str(rec.get("PMID", "")).strip()
-        entry = efetch_data.get(pmid, {})
-        xml_text = entry.get("RawXML")
         
-        if not pmid or not xml_text:
-            enriched.append(rec)
-            continue
+        # Check for full text first
+        full_text_entry = pmc_fulltext_map.get(pmid)
+        full_text_used = False
+        
+        if full_text_entry and full_text_entry.get("full_text"):
+            text_to_analyze = f"Analysis based on Full Text (Abstract + Methods + Results + Data/Code Availability):\n\n{full_text_entry['full_text']}"
+            full_text_used = True
+        else:
+            # Fallback to Abstract XML
+            # We need to extract text from the XML if possible, or just use what we have
+            # The `efetch_data` has "Abstract" key which is already cleaned text
+            abstract_text = efetch_data.get(pmid, {}).get("Abstract", "")
+            if not abstract_text:
+                 text_to_analyze = "Title: " + str(rec.get("Title", "")) + "\n\n(No Abstract Available)"
+            else:
+                text_to_analyze = f"Analysis based on Abstract:\n\n{abstract_text}"
 
         try:
-            xml_text = _sanitize_xml_for_gemini(xml_text)
-            prompt = f"Analyze this PubMed XML for PMID {pmid}:\n\n{xml_text}"
+            prompt = f"Analyze this text for PMID {pmid}:\n\n{text_to_analyze}"
             resp = model.generate_content(prompt)
-            data = json.loads(resp.text)
+            parsed = json.loads(resp.text)
+            
+            # Defaulting logic if keys missing
+            parsed.setdefault("RelevanceScore", 0)
+            parsed.setdefault("WhyRelevant", "Analysis failed or returned empty.")
+            parsed.setdefault("StudySummary", "")
+            parsed.setdefault("Methods", "")
+            parsed.setdefault("KeyFindings", "")
+            parsed.setdefault("DataTypes", "")
 
-            data_types_raw = data.get("DataTypes", "")
+            data_types_raw = parsed.get("DataTypes", "")
             if data_types_raw:
                 raw_types = [t.strip().lower() for t in data_types_raw.replace(";", ",").split(",") if t.strip()]
                 normalized_types = []
                 for dt in raw_types:
+                    # Check if known
                     matched = False
                     for known in KNOWN_DATA_TYPES:
-                        if known in dt or dt in known:
+                        if known in dt:
                             normalized_types.append(known)
                             matched = True
                             break
                     if not matched:
                         normalized_types.append(dt)
-                data["DataTypes"] = ", ".join(list(dict.fromkeys(normalized_types)))
+                parsed["DataTypes"] = ", ".join(list(dict.fromkeys(normalized_types)))
+
+            relevance_score = parsed.get("RelevanceScore", 0)
+            why_relevant = parsed.get("WhyRelevant", "")
+            
+            # Consistency Check (Self-Correction)
+            if relevance_score == 0 and ("highly relevant" in why_relevant.lower() or "relevant to prostate" in why_relevant.lower()):
+                # If text says relevant but score is 0, bump it to 50 (Medium)
+                relevance_score = 50
+                parsed["RelevanceScore"] = 50
+            
+            methods_str = parsed.get("Methods", "").lower()
+            key_findings_str = parsed.get("KeyFindings", "").lower()
+            
+            # Pipeline Confidence Logic
+            confidence = "Low"
+            if full_text_used:
+                confidence = "High"
+            else:
+                # Abstract only
+                # If score >= 80, Medium
+                if relevance_score >= 80:
+                    confidence = "Medium"
+                else:
+                    # Check keywords
+                    strong_keywords = ["spatial", "visium", "xenium", "cosmx", "scrna", "snrna", "multiome"]
+                    if any(k in methods_str for k in strong_keywords) or any(k in key_findings_str for k in strong_keywords):
+                        confidence = "Medium"
 
             rec.update({
-                "RelevanceScore": data.get("RelevanceScore", 0),
-                "WhyRelevant": data.get("WhyRelevant", ""),
-                "StudySummary": data.get("StudySummary", ""),
-                "Methods": data.get("Methods", ""),
-                "KeyFindings": data.get("KeyFindings", ""),
-                "DataTypes": data.get("DataTypes", "")
+                "RelevanceScore": relevance_score,
+                "WhyRelevant": parsed.get("WhyRelevant", ""),
+                "StudySummary": parsed.get("StudySummary", ""),
+                "Methods": parsed.get("Methods", ""),
+                "KeyFindings": parsed.get("KeyFindings", ""),
+                "DataTypes": parsed.get("DataTypes", ""),
+                "PipelineConfidence": confidence,
+                "FullTextUsed": full_text_used
             })
             
             time.sleep(1) # Rate limiting
             
         except Exception as e:
             logger.warning(f"Gemini enrichment failed for PMID={pmid}: {e}")
-            rec["WhyRelevant"] = "Error during AI enrichment"
+            rec["WhyRelevant"] = f"Error during AI enrichment: {str(e)}"
+            # Ensure other fields are not None to avoid Notion errors if schema expects string
+            rec.setdefault("RelevanceScore", 0)
+            rec.setdefault("StudySummary", "")
+            rec.setdefault("Methods", "")
+            rec.setdefault("KeyFindings", "")
+            rec.setdefault("DataTypes", "")
+            rec.setdefault("PipelineConfidence", "Low")
+            rec.setdefault("FullTextUsed", False)
             
         enriched.append(rec)
 
@@ -765,22 +1121,14 @@ def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     pubdate = rec.get("PubDateParsed")
     authors = rec.get("Authors")
     abstract = rec.get("Abstract")
-    geo_list = rec.get("GEO_List", "")
-    sra_project = rec.get("SRA_Project", "")
     mesh_heading_list = rec.get("MeshHeadingList", "")
     mesh_terms = rec.get("MeSH_Terms", "")
     major_mesh = rec.get("Major_MeSH", "")
-    study_summary = rec.get("StudySummary", "")
-    why_relevant = rec.get("WhyRelevant", "")
-    methods = rec.get("Methods", "")
-    key_findings = rec.get("KeyFindings", "")
-    data_types = rec.get("DataTypes", "")
-    relevance_score = rec.get("RelevanceScore", 0)
 
     mesh_terms_list = [t.strip().replace(",", " -") for t in mesh_terms.split(";") if t.strip()] if mesh_terms else []
     major_mesh_list = [t.strip().replace(",", " -") for t in major_mesh.split(";") if t.strip()] if major_mesh else []
-    data_types_list = [t.strip().replace(",", " -") for t in data_types.replace(";", ",").split(",") if t.strip()] if data_types else []
 
+    # Base properties (always included)
     props: Dict[str, Any] = {
         "Title": {"title": [{"text": {"content": title or "Untitled"}}]},
         "DOI": {"rich_text": ([{"text": {"content": _truncate(doi)}}] if doi else [])},
@@ -789,25 +1137,51 @@ def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
         "Journal": {"rich_text": ([{"text": {"content": _truncate(journal)}}] if journal else [])},
         "Abstract": {"rich_text": ([{"text": {"content": _truncate(abstract)}}] if abstract else [])},
         "Authors": {"rich_text": ([{"text": {"content": _truncate(authors)}}] if authors else [])},
-        "GEO_List": {"rich_text": ([{"text": {"content": _truncate(geo_list)}}] if geo_list else [])},
-        "SRA_Project": {"rich_text": ([{"text": {"content": _truncate(sra_project)}}] if sra_project else [])},
         "MeshHeadingList": {"rich_text": ([{"text": {"content": _truncate(mesh_heading_list)}}] if mesh_heading_list else [])},
         "MeSH_Terms": {"multi_select": ([{"name": t} for t in mesh_terms_list] if mesh_terms_list else [])},
         "Major_MeSH": {"multi_select": ([{"name": t} for t in major_mesh_list] if major_mesh_list else [])},
-        "StudySummary": {"rich_text": ([{"text": {"content": _truncate(study_summary)}}] if study_summary else [])},
-        "WhyRelevant": {"rich_text": ([{"text": {"content": _truncate(why_relevant)}}] if why_relevant else [])},
-        "Methods": {"rich_text": ([{"text": {"content": _truncate(methods)}}] if methods else [])},
-        "KeyFindings": {"rich_text": ([{"text": {"content": _truncate(key_findings)}}] if key_findings else [])},
-        "DataTypes": {"multi_select": ([{"name": dt} for dt in data_types_list] if data_types_list else [])},
-        "RelevanceScore": {"number": relevance_score},
         "DedupeKey": {"rich_text": [{"text": {"content": _truncate(rec.get("DedupeKey", ""))}}]},
         "LastChecked": {"date": {"start": datetime.utcnow().isoformat()}},
-        "IsReview": {"rich_text": ([{"text": {"content": _truncate(rec.get("IsReview", ""))}}] if rec.get("IsReview") else [])},
         "PublicationTypes": {"rich_text": ([{"text": {"content": _truncate(rec.get("PublicationTypes", ""))}}] if rec.get("PublicationTypes") else [])},
     }
 
     if pubdate:
         props["PubDate"] = {"date": {"start": pubdate.isoformat()}}
+
+    # AI-generated fields - only include if present in record
+    # These are only set by gemini_enrich_records, so they won't exist for records that skip enrichment
+    
+    if "RelevanceScore" in rec:
+        props["RelevanceScore"] = {"number": rec["RelevanceScore"]}
+    
+    if "PipelineConfidence" in rec:
+        props["PipelineConfidence"] = {"multi_select": [{"name": rec["PipelineConfidence"]}]}
+    
+    if "FullTextUsed" in rec:
+        props["FullTextUsed"] = {"checkbox": bool(rec["FullTextUsed"])}
+    
+    if "StudySummary" in rec and rec["StudySummary"]:
+        props["StudySummary"] = {"rich_text": [{"text": {"content": _truncate(rec["StudySummary"])}}]}
+    
+    if "WhyRelevant" in rec and rec["WhyRelevant"]:
+        props["WhyRelevant"] = {"rich_text": [{"text": {"content": _truncate(rec["WhyRelevant"])}}]}
+    
+    if "Methods" in rec and rec["Methods"]:
+        props["Methods"] = {"rich_text": [{"text": {"content": _truncate(rec["Methods"])}}]}
+    
+    if "KeyFindings" in rec and rec["KeyFindings"]:
+        props["KeyFindings"] = {"rich_text": [{"text": {"content": _truncate(rec["KeyFindings"])}}]}
+    
+    if "DataTypes" in rec and rec["DataTypes"]:
+        data_types_list = [t.strip().replace(",", " -") for t in rec["DataTypes"].replace(";", ",").split(",") if t.strip()]
+        if data_types_list:
+            props["DataTypes"] = {"multi_select": [{"name": dt} for dt in data_types_list]}
+    
+    if "GEO_List" in rec and rec["GEO_List"]:
+        props["GEO_List"] = {"rich_text": [{"text": {"content": _truncate(rec["GEO_List"])}}]}
+    
+    if "SRA_Project" in rec and rec["SRA_Project"]:
+        props["SRA_Project"] = {"rich_text": [{"text": {"content": _truncate(rec["SRA_Project"])}}]}
 
     # Remove empty rich_text blocks
     for k in list(props.keys()):
@@ -973,50 +1347,206 @@ def literature_search_flow(
 ):
     logger = get_run_logger()
     cfg = get_config(
-    query_term=query_term,
-    rel_date_days=rel_date_days,
-    retmax=retmax,
-    dry_run=dry_run,
-    tier=tier,
+        query_term=query_term,
+        rel_date_days=rel_date_days,
+        retmax=retmax,
+        dry_run=dry_run,
+        tier=tier,
     )
 
+    # 1. Build Notion Index FIRST
+    index = notion_build_index(cfg)
+    
+    # 2. Search
     esearch_out = pubmed_esearch(cfg)
     validation = validate_results(esearch_out, cfg)
     
     count = validation["validation"]["count"]
-    total = min(count, cfg["RETMAX"])
     if count == 0:
         logger.info("No results from PubMed; stopping flow.")
         return
 
-    esummary_json = pubmed_esummary_history(cfg, esearch_out, total)
-    abstracts_map = pubmed_efetch_abstracts_history(cfg, esearch_out, total)
-    records = normalize_records(esummary_json, abstracts_map)
+    # 3. Smart Pagination Loop
+    # Goal: Find `cfg["RETMAX"]` *new* papers.
+    # We will try up to 3 extra times if we hit duplicates.
+    
+    target_new_count = cfg["RETMAX"]
+    new_pmids = []
+    update_pmids = []
+    all_esummary_results = {} # Accumulate esummary data for normalization
+    
+    max_retries = 3
+    current_retstart = 0
+    
+    # First fetch size is target
+    current_fetch_size = target_new_count
+    
+    for attempt in range(max_retries + 1):
+        logger.info(f"--- Smart Search Attempt {attempt+1}/{max_retries+1} (Start={current_retstart}, Fetch={current_fetch_size}) ---")
+        
+        # Fetch batch of metadata (eSummary)
+        # Note: We use the history server, so we just need to advance retstart
+        # We need to ensure we don't go past total count
+        if current_retstart >= count:
+            logger.info("Reached end of search results.")
+            break
+            
+        # Clamp fetch size
+        this_batch_size = min(current_fetch_size, count - current_retstart)
+        
+        # Get eSummary for this batch
+        # We use the existing function but need to be careful about how it returns data
+        # It returns a dict with "result": {uid: {...}, uids: [...]}
+        esummary_json = pubmed_esummary_history(cfg, esearch_out, this_batch_size, start_offset=current_retstart)
+        
+        if not esummary_json or "result" not in esummary_json:
+            logger.warning("Failed to get eSummary data.")
+            break
+            
+        result_data = esummary_json.get("result", {})
+        uids = result_data.get("uids", [])
+        
+        if not uids:
+            logger.info("No UIDs returned in this batch.")
+            break
+            
+        # Check against Notion Index
+        batch_new = []
+        batch_update = []
+        
+        for pmid in uids:
+            # Add to accumulator
+            all_esummary_results[pmid] = result_data[pmid]
+            
+            # Check duplication (using PMID or DOI if available in summary? Index is keyed by DedupeKey)
+            # We construct a temp DedupeKey to check. 
+            # Note: eSummary has 'elocationid' which might be DOI, or 'articleids'.
+            # Let's try to find DOI.
+            rec = result_data[pmid]
+            doi = None
+            for id_obj in rec.get("articleids", []):
+                if id_obj.get("idtype") == "doi":
+                    doi = id_obj.get("value")
+                    break
+            
+            key = doi if doi else f"PMID:{pmid}"
+            
+            if key in index:
+                batch_update.append({"PMID": pmid, "DedupeKey": key, "page_id": index[key]})
+            else:
+                batch_new.append(pmid)
+        
+        new_pmids.extend(batch_new)
+        update_pmids.extend(batch_update)
+        
+        logger.info(f"Batch result: {len(batch_new)} new, {len(batch_update)} existing.")
+        
+        if len(new_pmids) >= target_new_count:
+            logger.info(f"Found enough new papers ({len(new_pmids)} >= {target_new_count}). Stopping search.")
+            break
+            
+        # Prepare for next iteration
+        current_retstart += this_batch_size
+        # For subsequent retries, fetch a fixed chunk (e.g., 30) to try to find more
+        current_fetch_size = 30
+        
+    # Trim to target if we over-fetched
+    new_pmids = new_pmids[:target_new_count]
+    logger.info(f"Final Selection: {len(new_pmids)} new papers to process.")
 
-    if not records:
-        logger.info("No normalized records; stopping.")
+    if not new_pmids and not update_pmids:
+        logger.info("No papers found (new or existing). Stopping.")
         return
 
-    gold_check = validate_goldset(records, cfg)
-    if gold_check.get("goldMissing"):
-        logger.warning(f"Gold set items missing: {gold_check['missing']}")
+    # 4. Fetch Abstracts & Full Text for NEW papers only
+    # We need to construct a map for normalization
+    # For existing papers, we don't need to fetch abstracts/fulltext unless we want to re-process them.
+    # Current requirement: "just update notion db lastcheck time" for existing.
+    
+    abstracts_map = {}
+    pmc_fulltext_map = {}
+    
+    if new_pmids:
+        logger.info(f"Fetching abstracts for {len(new_pmids)} new papers...")
+        abstracts_map = pubmed_efetch_abstracts_by_ids(cfg, new_pmids)
+        
+        # Extract PMCIDs from the fetched abstracts map to drive full text fetch
+        pmc_candidates = []
+        for pmid, data in abstracts_map.items():
+            if data.get("PMCID"):
+                pmc_candidates.append(data["PMCID"])
+        
+        if pmc_candidates:
+            logger.info(f"Fetching PMC full text for {len(pmc_candidates)} candidates...")
+            # We need to pass a map of {PMID: PMCID} or just list of PMCIDs?
+            # The existing fetch_pmc_fulltext takes a cfg and... wait, it took abstracts_map before.
+            # Let's check `fetch_pmc_fulltext` signature.
+            # It was: def fetch_pmc_fulltext(cfg: Dict[str, Any], abstracts_map: Dict[str, Dict[str, Optional[str]]])
+            # So we can pass our new abstracts_map!
+            pmc_fulltext_map = fetch_pmc_fulltext(cfg, abstracts_map)
 
-    index = notion_build_index(cfg)
-    to_create, to_update = classify_records(records, index)
+    # 5. Normalize
+    # We need to pass the accumulated esummary data, but formatted as the original JSON structure expected by normalize
+    # normalize_records expects: esummary_json: Dict[str, Any] with "result" key
+    # We can reconstruct it.
+    combined_esummary = {"result": all_esummary_results}
+    # We also need to make sure uids list is present if normalize uses it? 
+    # normalize iterates over result.items(), so uids list is not strictly needed but good to have.
+    combined_esummary["result"]["uids"] = list(all_esummary_results.keys())
     
-    if not to_create:
-        logger.info("No new papers to create. Skipping Gemini enrichment and stopping.")
-        return
+    records = normalize_records(combined_esummary, abstracts_map)
     
-    logger.info(f"Running Gemini enrichment on {len(to_create)} new papers...")
-    to_create = gemini_enrich_records(to_create, abstracts_map)
+    # 6. Separate New vs Existing (again, but now with full records)
+    # We already identified them, but normalize_records might have filtered some (e.g. non-digit PMIDs).
+    # Let's re-classify based on the normalized records.
     
-    create_res = notion_create_pages(cfg, to_create)
-    update_res = notion_update_pages(cfg, to_update)
+    to_create = []
+    to_update_final = []
+    
+    # Map our update list for quick lookup
+    update_map = {u["PMID"]: u["page_id"] for u in update_pmids}
+    
+    for rec in records:
+        pmid = rec["PMID"]
+        if pmid in update_map:
+            rec["page_id"] = update_map[pmid]
+            to_update_final.append(rec)
+        elif pmid in new_pmids:
+             to_create.append(rec)
+        else:
+            # Should not happen if logic is correct, but maybe if esummary had extra items
+            pass
+
+    # 7. Enrich NEW papers
+    num_new_candidates = 0
+    if to_create:
+        logger.info(f"Running Gemini enrichment on {len(to_create)} new papers...")
+        enriched_new = gemini_enrich_records(to_create, abstracts_map, pmc_fulltext_map)
+        num_new_candidates = len(enriched_new)
+        
+        # Apply minimum relevance filter before creating Notion pages
+        min_relevance = 75
+        high_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) >= min_relevance]
+        low_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) < min_relevance]
+        
+        logger.info(
+            f"Gemini enrichment → {len(high_conf)} records with RelevanceScore ≥ {min_relevance}, "
+            f"{len(low_conf)} below threshold (kept out of Notion)."
+        )
+        
+        create_res = notion_create_pages(cfg, high_conf)
+    else:
+        create_res = {"created": 0}
+
+    # 8. Update EXISTING papers
+    if to_update_final:
+        logger.info(f"Updating {len(to_update_final)} existing papers (LastChecked)...")
+        update_res = notion_update_pages(cfg, to_update_final)
+    else:
+        update_res = {"updated": 0}
 
     logger.info(
-        f"Summary → total={count}, normalized={len(records)}, "
-        f"to_create={len(to_create)}, to_update={len(to_update)}, "
+        f"Summary → total_found={count}, new_selected={num_new_candidates}, existing_updated={len(to_update_final)}, "
         f"created={create_res.get('created', 0)}, updated={update_res.get('updated', 0)}"
     )
 
