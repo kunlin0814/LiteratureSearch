@@ -1,20 +1,18 @@
 """
-Prefect version of your n8n `LiteratureSearch` workflow.
+Prefect-based LiteratureSearch workflow.
 
-High-level steps:
-1. Load config (query term, time window, retmax, keys).
-2. PubMed eSearch → get PMIDs.
-3. Validate results (count / gold checks).
-4. If no results → stop.
-5. PubMed eSummary + eFetch (abstracts).
-6. Normalize into unified article records with DedupeKey.
-7. Pull Notion DB pages → build {DedupeKey -> page_id} index.
-8. Classify each record as create vs update.
-9. Create new Notion pages; update existing ones.
+High-level flow:
+1. Load config (tiered or explicit PubMed query, time window, retmax, API keys).
+2. Run PubMed eSearch (history mode) to retrieve PMIDs and WebEnv/QueryKey.
+3. Validate the result set (hit count and gold-set coverage).
+4. If no results, stop early.
+5. Fetch metadata via PubMed eSummary and XML via eFetch (abstracts, MeSH, GEO/SRA).
+6. Normalize into unified article records with a DedupeKey (DOI or PMID).
+7. Query the Notion database and build a {DedupeKey -> page_id} index.
+8. Classify each record as “to_create” (new) or “to_update” (existing).
+9. Enrich new records with Gemini 2.5 Flash (relevance score, summary, methods, data types) when a GOOGLE_API_KEY is available.
+10. Create new Notion pages and update existing ones (unless running in --dry-run mode).
 
-You will need:
-- PREFECT 2.x/3.x installed
-- `requests` installed
 - Environment variables:
     NCBI_API_KEY, NCBI_EMAIL, NOTION_TOKEN, NOTION_DB_ID, GOOGLE_API_KEY
 """
@@ -104,18 +102,85 @@ def get_config(
     rel_date_days: Optional[int] = None,
     retmax: Optional[int] = None,
     dry_run: Optional[bool] = None,
+    tier: Optional[int] = 1,
 ) -> Dict[str, Any]:
     """
     Equivalent to the n8n Config nodes.
     """
-    base_query = (
-        '("Prostatic Neoplasms"[MeSH Terms] OR prostat*[tiab] OR "prostate cancer"[tiab]) '
-        'AND ("spatial transcriptomics"[tw] OR "spatial multiomics"[tw] OR Visium[tw] OR \
-        Xenium[tw] OR CosMX[tw] OR GeoMx[tw] OR "Slide-seq"[tw] OR scRNA[tw] OR "single-cell"[tw] \
-        OR scATAC[tw] OR ATAC-seq[tw] OR multiome[tw] OR spatial-ATAC OR pseudotime[tw])'
-    )
+        # Tiered default queries
+
+    # Tier 1: prostate-focused, high precision
+    tier1_query = """
+    ("Prostatic Neoplasms"[MeSH Terms] 
+    OR prostate[tiab] 
+    OR prostatic[tiab] 
+    OR "prostate cancer"[tiab])
+    AND
+    ("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab] 
+    OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab] 
+    OR Visium[tiab] OR Xenium[tiab] 
+    OR "Slide-seq"[tiab] OR "SlideSeq"[tiab] 
+    OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab] 
+    OR "single-cell"[tiab] OR "single cell"[tiab] 
+    OR "single-nucleus"[tiab] OR "single nucleus"[tiab] 
+    OR scRNA*[tiab] OR snRNA*[tiab] OR scATAC*[tiab] OR snATAC*[tiab] 
+    OR multiome[tiab] OR "10x multiome"[tiab] 
+    OR pseudotime[tiab] OR "trajectory inference"[tiab] OR "RNA velocity"[tiab])
+    AND ("Journal Article"[pt] 
+	NOT "Review"[pt] 
+	NOT "Editorial"[pt] 
+	NOT "Comment"[pt] 
+	NOT "Letter"[pt] 
+	NOT "News"[pt] 
+	NOT "Case Reports"[pt])
+    AND english[la]
+    NOT "Preprint"[Publication Type]
+"""
+
+    # Tier 2: broader cancer, method/technology-oriented
+    tier2_query = """
+	("Neoplasms"[MeSH Terms]
+	OR cancer[tiab]
+	OR cancers[tiab]
+	OR carcinoma[tiab]
+	OR carcinomas[tiab]
+	OR tumor[tiab]
+	OR tumors[tiab]
+	OR malignan*[tiab])
+	AND
+	("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab]
+	OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab]
+	OR Visium[tiab] OR Xenium[tiab] OR CosMX[tiab] OR GeoMx[tiab]
+	OR "Slide-seq"[tiab] OR "SlideSeq"[tiab]
+	OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab]
+	OR "single-cell"[tiab] OR "single cell"[tiab]
+	OR "single-nucleus"[tiab] OR "single nucleus"[tiab]
+	OR scRNA*[tiab] OR snRNA*[tiab] OR scATAC*[tiab] OR snATAC*[tiab]
+	OR multiome[tiab] OR "10x multiome"[tiab]
+	OR pseudotime[tiab] OR "trajectory inference"[tiab] OR "RNA velocity"[tiab])
+ 	AND (
+	"Journal Article"[pt] 
+	NOT "Review"[pt] 
+	NOT "Editorial"[pt] 
+	NOT "Comment"[pt] 
+	NOT "Letter"[pt] 
+	NOT "News"[pt] 
+	NOT "Case Reports"[pt]
+	)
+    AND english[la]
+ 	NOT "Preprint"[Publication Type]
+"""
+
+    # Choose query: explicit > tiered defaults
+    if query_term:
+        resolved_query = query_term
+    else:
+        if tier == 2:
+            resolved_query = tier2_query
+        else:
+            resolved_query = tier1_query
     cfg = {
-        "QUERY_TERM": query_term or base_query,
+        "QUERY_TERM": resolved_query,
         "RETMAX": int(retmax) if retmax is not None else 200,
         "RELDATE_DAYS": int(rel_date_days) if rel_date_days is not None else 365,
         "NCBI_API_KEY": os.environ.get("NCBI_API_KEY", ""),
@@ -123,8 +188,8 @@ def get_config(
         "DATETYPE": os.environ.get("NCBI_DATETYPE", "pdat"),
         "HISTORICAL_MEDIAN": 500,
         "GOLD_SET": [
-            "40119005",  # Example PMID
-            "10.1038/s41596-025-01145-9.",  # Example DOI
+            "36750562",  # Example PMID
+            "10.1038/s41467-023-36325-2",  # Example DOI
         ],
         "NOTION_TOKEN": os.environ.get("NOTION_TOKEN", ""),
         "NOTION_DB_ID": os.environ.get("NOTION_DB_ID", ""),
@@ -904,9 +969,16 @@ def literature_search_flow(
     rel_date_days: Optional[int] = None,
     retmax: Optional[int] = None,
     dry_run: Optional[bool] = None,
+    tier: Optional[int] = 1,
 ):
     logger = get_run_logger()
-    cfg = get_config(query_term, rel_date_days, retmax, dry_run)
+    cfg = get_config(
+    query_term=query_term,
+    rel_date_days=rel_date_days,
+    retmax=retmax,
+    dry_run=dry_run,
+    tier=tier,
+    )
 
     esearch_out = pubmed_esearch(cfg)
     validation = validate_results(esearch_out, cfg)
@@ -954,61 +1026,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run LiteratureSearch Prefect flow")
     parser.add_argument("--query", dest="query_term", type=str, default=None)
-    parser.add_argument("--reldays", dest="rel_date_days", type=int, default=1095)
-    parser.add_argument("--retmax", dest="retmax", type=int, default=200)
+    parser.add_argument("--reldays", dest="rel_date_days", type=int, default=365)
+    parser.add_argument("--retmax", dest="retmax", type=int, default=220)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
+    parser.add_argument("--tier", dest="tier", type=int, choices=[1, 2], default=1, help="1 = prostate-focused (default), 2 = broader cancer methods")
     args = parser.parse_args()
 
     literature_search_flow(
-        query_term=args.query_term,
-        rel_date_days=args.rel_date_days,
-        retmax=args.retmax,
-        dry_run=args.dry_run,
+    query_term=args.query_term,
+    rel_date_days=args.rel_date_days,
+    retmax=args.retmax,
+    dry_run=args.dry_run,
+    tier=args.tier,
     )
-### the following is the prompt for the Gemini model used in the workflow ###
-'''
-You are a biomedical literature-triage model.
-Your job is to take raw PubMed XML and produce two things:
-	1.	Relevance Score (0–100) for my research focus:
-prostate cancer, tumor microenvironment (TME), lineage plasticity, multi-omics (scRNA-seq, scATAC-seq, spatial), immune suppression, CNV, therapy resistance.
-	2.	Concise Summary optimized for literature screening.
-
-You may only use information from the XML.
-Do not invent details not present in the text.
-
-
-OUTPUT FORMAT (JSON)
-
-{
-  "PMID": "",
-  "Title": "",
-  "RelevanceScore": 0,
-  "WhyRelevant": "",
-  "StudySummary": "",
-  "Methods": "",
-  "KeyFindings": "",
-  "DataTypes": ""
-}
-
-Field definitions
-	•	WhyRelevant: 1–2 sentences explaining why the paper is relevant (or not).
-	•	StudySummary: 3–4 sentences max, written for a computational oncology researcher.
-	•	Methods: bullet list of major technologies (e.g., scRNA-seq, ST, WGS, CNV calling).
-	•	KeyFindings: bullet list of high-level biological insights.
-	•	DataTypes: e.g., “scRNA-seq”, “10x Visium ST”, “WGS”, “bulk RNA-seq”, “CNV”, etc.
-
-
-INSTRUCTIONS
-	1.	Parse the raw XML.
-	2.	Extract Title, PMID, Abstract, MeSH, DataBank, and any method hints.
-	3.	Score relevance strictly by:
-	•	✦ hallmark PCa topics (TME, immune suppression, ADT resistance)
-	•	✦ multi-omics (scRNA, scATAC, spatial)
-	•	✦ lineage plasticity / club-like cells / LP states
-	•	✦ CNV, clonal structure
-	4.	The RelevanceScore must reflect actual utility for computational biology — not general prostate literature.
-	•	90–100 = directly actionable
-	•	70–89  = useful background or similar methods
-	•	40–69  = tangential
-	•	<40     = not relevant
-'''
