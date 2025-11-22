@@ -38,8 +38,7 @@ pip install python-dotenv
 
 This pipeline relies on `python-dotenv` to load environment variables from the `.env` file. Make sure it is installed.
 ```
-
-Edit `.env`:
+Create a `.env` file in the project root with the following variables:
 ```
 NCBI_API_KEY=your_ncbi_api_key
 NCBI_EMAIL=your.email@institution.edu
