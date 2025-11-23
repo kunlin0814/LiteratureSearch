@@ -92,19 +92,17 @@ python Prefect_literatureSearch.py --dry-run
 
 ```mermaid
 graph TD
-    A[PubMed Search] --> B{Validate Results}
-    B -->|Pass| C[Fetch Metadata & Abstracts]
-    B -->|Fail| Z[Alert User]
-    C --> D{Has PMCID?}
-    D -->|Yes| E[Fetch Full Text]
-    D -->|No| F[Use Abstract Only]
-    E --> G[Normalize Records]
-    F --> G
-    G --> H{New Paper?}
-    H -->|Yes| I[Gemini Enrichment]
-    H -->|No| J[Update LastChecked]
-    I --> K[Create Notion Page]
-    J --> L[Update Notion Page]
+    A[PubMed Search] --> B[Fetch Metadata & Abstracts]
+    B --> C{Has PMCID?}
+    C -->|Yes| D[Fetch Full Text]
+    C -->|No| E[Use Abstract Only]
+    D --> F[Normalize Records]
+    E --> F
+    F --> G{New Paper?}
+    G -->|Yes| H[Gemini Enrichment]
+    G -->|No| I[Update LastChecked]
+    H --> J[Create Notion Page]
+    I --> K[Update Notion Page]
 ```
 
 ---
