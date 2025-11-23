@@ -51,8 +51,8 @@ We don't just keyword match. We use **Gemini** to understand the paper:
 Clone the repo and set up your environment:
 
 ```bash
-git clone https://github.com/yourusername/API_WF.git
-cd API_WF
+git clone https://github.com/yourusername/LiteratureSearch.git
+cd LiteratureSearch
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
