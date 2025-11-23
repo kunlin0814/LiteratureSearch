@@ -1,6 +1,6 @@
 # Literature Search & Triage Pipeline
 
-Automated PubMed → Gemini → Notion workflow for prostate spatial-omics literature.
+Automated PubMed → Gemini → Notion workflow for cancer spatial/single-cell literature triage.
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue) ![Prefect](https://img.shields.io/badge/prefect-3.x-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -8,37 +8,56 @@ Automated PubMed → Gemini → Notion workflow for prostate spatial-omics liter
 
 ## Overview
 
-This pipeline helps computational oncology researchers keep a structured, deduplicated Notion database of recent prostate cancer studies using spatial transcriptomics, single‑cell, ATAC, and multiomic technologies.
+Production-ready pipeline for computational oncology researchers to maintain a structured Notion database of spatial transcriptomics and single‑cell studies, with AI-powered relevance scoring and metadata enrichment.
 
-It:
-1. Queries PubMed with a focused prostate + spatial / single‑cell / multiome search.
-2. Fetches abstracts, MeSH terms, GEO/SRA accessions, publication metadata.
-3. Enriches new papers only using Gemini (native JSON schema) to extract relevance score & structured summaries.
-4. Normalizes and writes to Notion (safe truncation, multi‑select sanitation, dedupe by DOI/PMID).
-5. Performs gold‑set validation for drift detection.
+**What it does:**
+1. **Two-tier PubMed queries** – Tier 1 (prostate-focused) or Tier 2 (pan-cancer methods discovery).
+2. **Rich metadata extraction** – Abstracts, MeSH terms, GEO/SRA accessions, PMC full-text (when available).
+3. **Gemini AI enrichment** – Native JSON mode extracts `RelevanceScore`, `StudySummary`, `Methods`, `KeyFindings`, `DataTypes`.
+4. **Cost-optimized** – Only enriches new papers; XML sanitization reduces tokens.
+5. **Notion sync** – Safe truncation, multi-select normalization, DOI/PMID deduplication.
+6. **Quality checks** – Gold-set validation detects query drift.
 
-Extended, more detailed documentation lives in `DETAILS.md`.
+**Modular architecture:** Utility modules (`pmc_utils`, `data_extraction_utils`, `notion_utils`) separate concerns for maintainability.
+
+Extended technical documentation: `DETAILS.md`
 
 ---
 
-## Key Features (Condensed)
-- Native JSON AI enrichment (no post‑hoc parsing failures).
-- Deterministic low‑temperature relevance scoring (0–100 rubric).
-- Cost control: enrich only new records; XML sanitization reduces tokens.
-- Safe Notion sync: 2000‑char truncation, retry on 429, DOI/PMID dedupe.
-- Controlled vocabulary for `DataTypes` to prevent tag drift.
-- Gold‑set presence check (early warning of query drift).
+## Key Features
+
+**Discovery Strategy**
+- **Tier 1** (default): Prostate cancer + spatial/single-cell/multiome – high precision.
+- **Tier 2**: Pan-cancer spatial/multiome studies – captures transferable methods & tools.
+- Custom query override supported via `--query`.
+
+**AI Enrichment**
+- Gemini 2.5 Flash with enforced JSON schema (no parsing failures).
+- Temperature 0.1 for deterministic scoring.
+- Extracts: `RelevanceScore` (0–100), `WhyRelevant`, `StudySummary`, `Methods`, `KeyFindings`, `DataTypes`.
+- Controlled vocabulary prevents tag drift.
+
+**Data Extraction**
+- GEO/SRA accessions from DataBankList + ReferenceList (regex fallback).
+- MeSH terms with major/minor distinction and qualifiers.
+- PMC full-text when PMCID available (Abstract + Methods + Results + Data Availability).
+
+**Notion Integration**
+- 2000-char truncation safeguard (no API 400 errors).
+- Conditional field inclusion (only writes AI fields when present).
+- Multi-select comma sanitization (` -` replacement).
+- DOI/PMID deduplication keys.
+
+**Cost & Safety**
+- Only enriches new records (skip existing Notion entries).
+- XML sanitization (strips AuthorList/ReferenceList, ~40% token savings).
+- Retry with exponential backoff (429/5xx handling).
+- Gold-set validation for query drift detection.
 
 ---
 ## Before You Run
-```bash
-# Ensure .env support
-pip install python-dotenv
-```
 
-This pipeline relies on `python-dotenv` to load environment variables from the `.env` file. Make sure it is installed.
-
-Create a `.env` file in the project root with the following variables:
+Create a `.env` file in the project root (requires `python-dotenv` - already in `requirements.txt`):
 ```
 NCBI_API_KEY=your_ncbi_api_key
 NCBI_EMAIL=your.email@institution.edu
@@ -55,25 +74,24 @@ cd API_WF
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env  # (Optional helper; create if not present)
 ```
 
-Run:
+Create `.env` as shown above, then run:
 ```bash
+# Tier 1 (prostate-focused, default)
 python Prefect_literatureSearch.py
-```
 
-Custom query / window:
-```bash
+# Tier 2 (broader cancer methods)
+python Prefect_literatureSearch.py --tier 2
+
+# Custom query
 python Prefect_literatureSearch.py \
-  --query '("Prostatic Neoplasms"[MeSH] OR prostat*[tiab]) AND ("spatial transcriptomics"[tw] OR Visium[tw])' \
+  --query '("Prostatic Neoplasms"[MeSH]) AND ("spatial transcriptomics"[tw])' \
   --reldays 180 \
   --retmax 100
-```
 
-Dry run (no Notion writes):
-```bash
-python Prefect_literatureSearch.py --dry-run
+# Dry run (no Notion writes)
+python Prefect_literatureSearch.py --dry-run --tier 1
 ```
 
 ---
@@ -81,22 +99,37 @@ python Prefect_literatureSearch.py --dry-run
 ## CLI Flags
 | Flag | Purpose | Default |
 |------|---------|---------|
-| `--query` | Override built-in PubMed query | internal prostate spatial query |
-| `--reldays` | Look-back window (days) | 1095 |
-| `--retmax` | Max results to process | 200 |
+| `--tier` | Query tier: 1=prostate-focused, 2=pan-cancer methods | 1 |
+| `--query` | Override built-in tier query | None (uses tier) |
+| `--reldays` | Look-back window (days) | 365 |
+| `--retmax` | Max results to process | 220 |
 | `--dry-run` | Skip Notion create/update writes | False |
 
 ---
 
 ## Workflow
 ```
-PubMed eSearch → Validate → eSummary/eFetch → Normalize
+PubMed eSearch (tier query or custom) → Validate (count + gold-set)
+  ↓
+eSummary/eFetch (metadata + abstracts + MeSH + GEO/SRA)
+  ↓
+PMC Full-Text (when PMCID available) → Extract sections
+  ↓
+Normalize Records (DedupeKey = DOI or PMID:{id})
   ↓
 Build Notion Index → Classify (new vs existing)
   ↓
-Gemini Enrichment (new only) → Create Pages
-Existing pages → Update Pages
+Gemini Enrichment (new records only) → Structured JSON extraction
+  ↓
+Create/Update Notion Pages → Done
 ```
+
+**Key Tasks:**
+- `pubmed_esearch`: History-mode retrieval (WebEnv/QueryKey).
+- `pubmed_efetch_abstracts_history`: Batch XML fetch with utility function extraction.
+- `fetch_pmc_fulltext`: Opportunistic full-text retrieval for PMCID-tagged articles.
+- `gemini_enrich_records`: Schema-enforced AI analysis (low temp, native JSON).
+- `notion_create_pages` / `notion_update_pages`: Safe property mapping with truncation.
 
 ---
 
@@ -114,38 +147,54 @@ Temperature = 0.1 for consistency; schema enforced to avoid key drift.
 ---
 
 ## Minimal Notion Schema
-Required properties (case‑sensitive) for core functionality:
-- `Title` (Title)
-- `DedupeKey` (Text)
-- `PMID`, `DOI`, `URL`, `Journal` (Text/URL)
-- `Abstract` (Text)
-- `StudySummary`, `WhyRelevant`, `Methods`, `KeyFindings` (Text)
-- `DataTypes` (Multi-select)
-- `RelevanceScore` (Number)
-- `LastChecked` (Date)
 
-Optional but supported: `Authors`, `GEO_List`, `SRA_Project`, `MeSH_Terms`, `Major_MeSH`, `IsReview`, `PublicationTypes`, `MeshHeadingList`.
+**Required properties** (case-sensitive):
 
-Safeguards: all rich_text trimmed to 2000 chars; commas in multi‑select tokens replaced with ` -` to satisfy Notion validation.
+| Property | Type | Purpose |
+|----------|------|---------|
+| `Title` | Title | Paper title (auto) |
+| `DedupeKey` | Text | DOI or `PMID:{id}` |
+| `PMID` | Text | PubMed ID |
+| `DOI` | Text | Digital Object Identifier |
+| `URL` | URL | PubMed link |
+| `Journal` | Text | Full journal name |
+| `PubDate` | Date | Publication date |
+| `Abstract` | Text | Truncated to 2000 chars |
+| `StudySummary` | Text | AI-generated (3 sentences) |
+| `WhyRelevant` | Text | AI justification |
+| `Methods` | Text | Semicolon-separated tools |
+| `KeyFindings` | Text | Biological insights |
+| `DataTypes` | Multi-select | Normalized data types |
+| `RelevanceScore` | Number | 0-100 AI score |
+| `LastChecked` | Date | Sync timestamp |
+
+**Optional but supported:**
+`Authors`, `GEO_List`, `SRA_Project`, `MeSH_Terms`, `Major_MeSH`, `MeshHeadingList`, `PublicationTypes`, `PipelineConfidence`, `FullTextUsed`.
+
+**Safeguards:**
+- All rich_text fields truncated to 2000 chars.
+- Multi-select commas replaced with ` -` (Notion validation compliance).
+- Conditional AI field inclusion (only writes when enrichment occurred).
 
 ---
 
 ## Safeguards & Cost Controls
-| Aspect | Mechanism |
-|--------|-----------|
-| API retries | Requests session with backoff (429/5xx) |
-| Token usage | XML sanitization (remove AuthorList / ReferenceList) |
-| Duplicate pages | `DedupeKey` (DOI else `PMID:{id}`) |
-| Notion limits | Truncation + respect `Retry-After` on 429 |
-| Gemini spend | Enrich only new papers |
-| Query drift | Gold‑set validation |
 
-Typical academic run remains within free tiers (NCBI, Gemini, Notion).
+| Aspect | Implementation |
+|--------|----------------|
+| **API Retries** | Requests session: exponential backoff for 429/5xx/connection errors |
+| **Token Usage** | XML sanitization (strips AuthorList/ReferenceList, ~40% savings) |
+| **Duplicate Pages** | DOI-first deduplication; fallback to `PMID:{id}` |
+| **Notion Limits** | 2000-char truncation; respects `Retry-After` on 429 |
+| **Gemini Spend** | Only enriches new papers; skips existing Notion entries |
+| **Query Drift** | Gold-set validation (alerts if landmark papers missing) |
+| **PMC Full-Text** | Opportunistic (only when PMCID present); extracts key sections only |
+
+**Typical run cost:** $0 (all services free-tier: NCBI 10 req/sec, Gemini 1500 RPD, Notion unlimited reads).
 
 ---
 
-## Roadmap (High-Level)
-- Optional broader cancer “methods” secondary query tier.
+## Roadmap
 - Crossref / preprint ingestion.
 - MeSH topic clustering & trend visualization.
 - Citation network / influence scoring.

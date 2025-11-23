@@ -32,6 +32,11 @@ from prefect import flow, task, get_run_logger
 import google.generativeai as genai
 from dotenv import load_dotenv
 
+# Import utility modules for better code organization
+from pmc_utils import extract_pmc_sections
+from data_extraction_utils import extract_geo_sra_from_pubmed_xml, extract_mesh_from_pubmed_xml
+from notion_utils import build_notion_page_properties, truncate_for_notion
+
 load_dotenv()  # This loads the variables from .env into os.environ
 
 # Configure Gemini
@@ -64,13 +69,7 @@ def _make_session(max_retries: int = 5, backoff_factor: float = 1.0) -> requests
     return session
 
 
-def _truncate(text: Optional[str], limit: int = 2000) -> str:
-    """Safe truncation to avoid Notion API 400 errors."""
-    if not text:
-        return ""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
+# Helper function _truncate moved to notion_utils.py
 
 
 @task
@@ -219,61 +218,7 @@ def pubmed_esearch(cfg: Dict[str, Any]) -> Dict[str, Any]:
 # 2.5 PMC Full Text Retrieval
 # -------------------------
 
-def _extract_pmc_sections(xml_text: str) -> str:
-    """
-    Parses PMC XML to extract Abstract, Methods, and Results.
-    Discards Introduction, Discussion, References to save tokens.
-    """
-    try:
-        root = ET.fromstring(xml_text)
-        
-        # 1. Abstract
-        abstract_parts = []
-        for abst in root.findall(".//abstract"):
-            for p in abst.findall(".//p"):
-                if p.text:
-                    abstract_parts.append(p.text.strip())
-        abstract_text = " ".join(abstract_parts)
-
-        # 2. Body Sections
-        methods_text = []
-        results_text = []
-        
-        # Iterate over all sections in the body
-        data_code_text = []
-        
-        for sec in root.findall(".//sec"):
-            title_elem = sec.find("title")
-            title = title_elem.text.lower() if (title_elem is not None and title_elem.text) else ""
-            sec_type = sec.attrib.get("sec-type", "").lower()
-            
-            # Get all text in this section
-            # (naive: itertext)
-            full_sec_text = "".join(sec.itertext()).strip()
-            if not full_sec_text:
-                continue
-                
-            if "methods" in title or "methods" in sec_type:
-                methods_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Methods'} ---\n{full_sec_text}")
-            elif "results" in title or "results" in sec_type:
-                results_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Results'} ---\n{full_sec_text}")
-            elif "data availability" in title or "code availability" in title or "availability" in title:
-                data_code_text.append(f"--- Section: {title_elem.text if title_elem is not None else 'Availability'} ---\n{full_sec_text}")
-
-        # Combine
-        final_parts = []
-        if abstract_text:
-            final_parts.append(f"ABSTRACT:\n{abstract_text}")
-        if methods_text:
-            final_parts.append(f"METHODS:\n" + "\n\n".join(methods_text))
-        if results_text:
-            final_parts.append(f"RESULTS:\n" + "\n\n".join(results_text))
-        if data_code_text:
-            final_parts.append(f"DATA & CODE AVAILABILITY:\n" + "\n\n".join(data_code_text))
-            
-        return "\n\n".join(final_parts)
-    except Exception as e:
-        return f"Error parsing XML: {str(e)}"
+# Helper function _extract_pmc_sections moved to pmc_utils.py
 
 
 # -------------------------
@@ -394,97 +339,11 @@ def pubmed_efetch_abstracts_by_ids(cfg: Dict[str, Any], pmids: List[str]) -> Dic
                     pmcid = aid.text.strip()
                     break
 
-            # --- Extract GEO and SRA from DataBankList and ReferenceList ---
-            geo_accessions = set()
-            sra_accessions = set()
+            # --- Extract GEO and SRA using utility function ---
+            geo_list, sra_project = extract_geo_sra_from_pubmed_xml(art)
             
-            # Method 1: DataBankList (structured metadata)
-            data_bank_list_elem = art.find(".//DataBankList")
-            if data_bank_list_elem is not None:
-                for databank in data_bank_list_elem.findall(".//DataBank"):
-                    db_name_elem = databank.find("DataBankName")
-                    db_name = db_name_elem.text.strip() if db_name_elem is not None and db_name_elem.text else ""
-                    acc_list_elem = databank.find("AccessionNumberList")
-                    if acc_list_elem is not None:
-                        accs = [acc.text.strip() for acc in acc_list_elem.findall("AccessionNumber") if acc.text]
-                        if db_name.upper() == "GEO":
-                            geo_accessions.update(accs)
-                        elif db_name.upper() == "SRA":
-                            sra_accessions.update(accs)
-            
-            # Method 2: ReferenceList (fallback for papers that cite data as references)
-            # Many newer papers include GEO/SRA accessions in reference citations
-            # Note: ReferenceList is under PubmedData, not MedlineCitation, so we search from parent
-            import re
-            # Get the parent PubmedArticle element to access PubmedData/ReferenceList
-            # Since we're iterating through PubmedArticle elements, we can search within them
-            ref_list_elem = None
-            # Try to find ReferenceList - could be at different nesting levels
-            for possible_ref_list in [art.find(".//ReferenceList"), art.find("../PubmedData/ReferenceList" if hasattr(art, 'find') else None)]:
-                if possible_ref_list is not None:
-                    ref_list_elem = possible_ref_list
-                    break
-            
-            # If still not found, try getting it from the article XML directly
-            if ref_list_elem is None:
-                # Parse the full article as string to find ReferenceList anywhere
-                article_str = ET.tostring(art, encoding='unicode')
-                if '<ReferenceList>' in article_str:
-                    # Create a temporary element to parse the full article structure
-                    temp_root = ET.fromstring(f'<temp>{article_str}</temp>')
-                    ref_list_elem = temp_root.find('.//ReferenceList')
-            
-            if ref_list_elem is not None:
-                for ref in ref_list_elem.findall('.//Reference'):
-                    citation_elem = ref.find('Citation')
-                    if citation_elem is not None:
-                        # Citation may have child elements like <i>, so use itertext() to get all text
-                        citation_text = ''.join(citation_elem.itertext())
-                        # Extract GEO accessions (GSE followed by digits)
-                        geo_matches = re.findall(r'GSE\d+', citation_text)
-                        geo_accessions.update(geo_matches)
-                        # Extract SRA/BioProject accessions
-                        sra_matches = re.findall(r'(?:PRJNA|SRP|SRR|SRX|SRS)\d+', citation_text)
-                        sra_accessions.update(sra_matches)
-            
-            geo_list = ", ".join(sorted(geo_accessions)) if geo_accessions else ""
-            sra_project = ", ".join(sorted(sra_accessions)) if sra_accessions else ""
-
-            # Metadata extraction (Mesh, etc) - reused logic could be refactored but keeping inline for safety
-            mesh_terms_set = set()
-            major_mesh_set = set()
-            mesh_heading_entries = []
-            mesh_terms = ""
-            major_mesh = ""
-
-            for mh in art.findall(".//MeshHeading"):
-                desc = mh.find("DescriptorName")
-                if desc is None: 
-                    continue
-                desc_text = desc.text
-                major_topic_yn = desc.attrib.get("MajorTopicYN", "N")
-
-                qualifiers = []
-                for q in mh.findall("QualifierName"):
-                    if q.text:
-                        qualifiers.append(q.text)
-                        if q.attrib.get("MajorTopicYN", "N") == "Y":
-                            major_topic_yn = "Y"
-
-                if qualifiers:
-                    entry = f"{desc_text} ({', '.join(qualifiers)})"
-                else:
-                    entry = desc_text
-                mesh_heading_entries.append(entry)
-                mesh_terms_set.add(desc_text)
-                if major_topic_yn == "Y":
-                    major_mesh_set.add(desc_text)
-
-            mesh_heading_list = "; ".join(mesh_heading_entries) if mesh_heading_entries else ""
-            if mesh_terms_set:
-                mesh_terms = "; ".join(sorted(mesh_terms_set))
-            if major_mesh_set:
-                major_mesh = "; ".join(sorted(major_mesh_set))
+            # --- Extract MeSH terms using utility function ---
+            mesh_heading_list, mesh_terms, major_mesh = extract_mesh_from_pubmed_xml(art)
 
             efetch_map[pmid] = {
                 "Abstract": abstract,
@@ -741,7 +600,7 @@ def fetch_pmc_fulltext(cfg: Dict[str, Any], efetch_map: Dict[str, Dict[str, Any]
                 
                 # Serialize to string to pass to our extractor
                 article_xml_str = ET.tostring(article, encoding="unicode")
-                extracted_text = _extract_pmc_sections(article_xml_str)
+                extracted_text = extract_pmc_sections(article_xml_str)
                 
                 results[pmid] = {
                     "full_text": extracted_text,
@@ -1111,85 +970,7 @@ def validate_goldset(records: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict
 # -------------------------
 # 8. Notion Utils
 # -------------------------
-
-def _notion_page_properties_from_record(rec: Dict[str, Any]) -> Dict[str, Any]:
-    title = rec.get("Title") or rec.get("PMID")
-    doi = rec.get("DOI")
-    pmid = rec.get("PMID")
-    url = rec.get("URL")
-    journal = rec.get("Journal")
-    pubdate = rec.get("PubDateParsed")
-    authors = rec.get("Authors")
-    abstract = rec.get("Abstract")
-    mesh_heading_list = rec.get("MeshHeadingList", "")
-    mesh_terms = rec.get("MeSH_Terms", "")
-    major_mesh = rec.get("Major_MeSH", "")
-
-    mesh_terms_list = [t.strip().replace(",", " -") for t in mesh_terms.split(";") if t.strip()] if mesh_terms else []
-    major_mesh_list = [t.strip().replace(",", " -") for t in major_mesh.split(";") if t.strip()] if major_mesh else []
-
-    # Base properties (always included)
-    props: Dict[str, Any] = {
-        "Title": {"title": [{"text": {"content": title or "Untitled"}}]},
-        "DOI": {"rich_text": ([{"text": {"content": _truncate(doi)}}] if doi else [])},
-        "PMID": {"rich_text": ([{"text": {"content": _truncate(pmid)}}] if pmid else [])},
-        "URL": {"url": url},
-        "Journal": {"rich_text": ([{"text": {"content": _truncate(journal)}}] if journal else [])},
-        "Abstract": {"rich_text": ([{"text": {"content": _truncate(abstract)}}] if abstract else [])},
-        "Authors": {"rich_text": ([{"text": {"content": _truncate(authors)}}] if authors else [])},
-        "MeshHeadingList": {"rich_text": ([{"text": {"content": _truncate(mesh_heading_list)}}] if mesh_heading_list else [])},
-        "MeSH_Terms": {"multi_select": ([{"name": t} for t in mesh_terms_list] if mesh_terms_list else [])},
-        "Major_MeSH": {"multi_select": ([{"name": t} for t in major_mesh_list] if major_mesh_list else [])},
-        "DedupeKey": {"rich_text": [{"text": {"content": _truncate(rec.get("DedupeKey", ""))}}]},
-        "LastChecked": {"date": {"start": datetime.utcnow().isoformat()}},
-        "PublicationTypes": {"rich_text": ([{"text": {"content": _truncate(rec.get("PublicationTypes", ""))}}] if rec.get("PublicationTypes") else [])},
-    }
-
-    if pubdate:
-        props["PubDate"] = {"date": {"start": pubdate.isoformat()}}
-
-    # AI-generated fields - only include if present in record
-    # These are only set by gemini_enrich_records, so they won't exist for records that skip enrichment
-    
-    if "RelevanceScore" in rec:
-        props["RelevanceScore"] = {"number": rec["RelevanceScore"]}
-    
-    if "PipelineConfidence" in rec:
-        props["PipelineConfidence"] = {"multi_select": [{"name": rec["PipelineConfidence"]}]}
-    
-    if "FullTextUsed" in rec:
-        props["FullTextUsed"] = {"checkbox": bool(rec["FullTextUsed"])}
-    
-    if "StudySummary" in rec and rec["StudySummary"]:
-        props["StudySummary"] = {"rich_text": [{"text": {"content": _truncate(rec["StudySummary"])}}]}
-    
-    if "WhyRelevant" in rec and rec["WhyRelevant"]:
-        props["WhyRelevant"] = {"rich_text": [{"text": {"content": _truncate(rec["WhyRelevant"])}}]}
-    
-    if "Methods" in rec and rec["Methods"]:
-        props["Methods"] = {"rich_text": [{"text": {"content": _truncate(rec["Methods"])}}]}
-    
-    if "KeyFindings" in rec and rec["KeyFindings"]:
-        props["KeyFindings"] = {"rich_text": [{"text": {"content": _truncate(rec["KeyFindings"])}}]}
-    
-    if "DataTypes" in rec and rec["DataTypes"]:
-        data_types_list = [t.strip().replace(",", " -") for t in rec["DataTypes"].replace(";", ",").split(",") if t.strip()]
-        if data_types_list:
-            props["DataTypes"] = {"multi_select": [{"name": dt} for dt in data_types_list]}
-    
-    if "GEO_List" in rec and rec["GEO_List"]:
-        props["GEO_List"] = {"rich_text": [{"text": {"content": _truncate(rec["GEO_List"])}}]}
-    
-    if "SRA_Project" in rec and rec["SRA_Project"]:
-        props["SRA_Project"] = {"rich_text": [{"text": {"content": _truncate(rec["SRA_Project"])}}]}
-
-    # Remove empty rich_text blocks
-    for k in list(props.keys()):
-        v = props[k]
-        if isinstance(v, dict) and "rich_text" in v and not v["rich_text"]:
-            props.pop(k)
-
-    return props
+# Notion property building moved to notion_utils.py
 
 
 @task(retries=2, retry_delay_seconds=10)
@@ -1277,7 +1058,7 @@ def notion_create_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
     created = 0
 
     for rec in records:
-        props = _notion_page_properties_from_record(rec)
+        props = build_notion_page_properties(rec)
         payload = {"parent": {"database_id": db_id}, "properties": props}
         resp = session.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code >= 300:
@@ -1316,7 +1097,7 @@ def notion_update_pages(cfg: Dict[str, Any], records: List[Dict[str, Any]]) -> D
         page_id = rec.get("page_id")
         if not page_id:
             continue
-        props = _notion_page_properties_from_record(rec)
+        props = build_notion_page_properties(rec)
         url = f"https://api.notion.com/v1/pages/{page_id}"
         payload = {"properties": props}
         resp = session.patch(url, headers=headers, json=payload, timeout=30)
