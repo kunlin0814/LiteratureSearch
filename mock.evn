@@ -1,5 +1,0 @@
-NCBI_API_KEY="your_ncbi_api_key_here"
-NCBI_EMAIL="your_email_here"
-NOTION_TOKEN="secret_your_notion_integration_token_here"
-NOTION_DB_ID="your_notion_database_id_here"
-GOOGLE_API_KEY="your_google_api_key_here"
