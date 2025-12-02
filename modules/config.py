@@ -20,6 +20,7 @@ def get_config(
     AND
     ("spatial transcriptom*"[tiab] OR "spatial gene expression"[tiab]
     OR "spatial multiomic*"[tiab] OR "spatial omics"[tiab]
+    OR "spatial multi-omics"[tiab]
     OR Visium[tiab] OR Xenium[tiab] OR CosMx[tiab] OR GeoMx[tiab]
     OR "Slide-seq"[tiab] OR "SlideSeq"[tiab]
     OR "spatial ATAC"[tiab] OR "spatial-ATAC"[tiab]
