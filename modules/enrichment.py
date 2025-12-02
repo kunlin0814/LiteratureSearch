@@ -1,12 +1,74 @@
 import os
 import time
 import json
+import re
 from typing import Any, Dict, List
 
 import google.generativeai as genai
 from prefect import task, get_run_logger
 
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+
+
+def _extract_json_text(resp: Any) -> str:
+    """Pull best-effort JSON text out of a Gemini response."""
+    raw = (getattr(resp, "text", None) or "").strip()
+    if not raw and getattr(resp, "candidates", None):
+        # Fall back to concatenating candidate part texts.
+        for cand in resp.candidates:
+            parts = getattr(cand, "content", None)
+            if not parts or not getattr(parts, "parts", None):
+                continue
+            texts = [p.text for p in parts.parts if getattr(p, "text", None)]
+            if texts:
+                raw = "".join(texts).strip()
+                break
+    # Strip Markdown fences if present
+    if raw.startswith("```json"):
+        raw = raw[len("```json"):].strip()
+    elif raw.startswith("```"):
+        raw = raw[len("```"):].strip()
+    if raw.endswith("```"):
+        raw = raw[:-len("```")].strip()
+    return raw
+
+
+def _load_response_json(raw: str) -> Dict[str, Any]:
+    """Attempt to parse JSON even if Gemini wraps it in prose/code fences."""
+    if not raw:
+        return {}
+    
+    # Try direct parsing first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        # Try to salvage the first complete JSON object
+        try:
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+        
+        # If that fails, try to find and extract just the JSON structure
+        # Look for balanced braces
+        brace_count = 0
+        start_idx = raw.find('{')
+        if start_idx != -1:
+            for i in range(start_idx, len(raw)):
+                if raw[i] == '{':
+                    brace_count += 1
+                elif raw[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            return json.loads(raw[start_idx:i+1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+        
+        # Last resort: return empty dict and log the error
+        raise ValueError(f"Could not parse JSON from response. Original error: {e}")
 
 
 @task(retries=3, retry_delay_seconds=5)
@@ -103,9 +165,15 @@ def gemini_enrich_records(
                 text_to_analyze = f"Analysis based on Abstract:\n\n{abstract_text}"
         try:
             resp = model.generate_content(f"Analyze this text for PMID {pmid}:\n\n{text_to_analyze}")
-            parsed = json.loads(resp.text or "{}")
+            raw_json = _extract_json_text(resp)
+            parsed = _load_response_json(raw_json)
         except Exception as e:  # noqa: BLE001
             logger.warning("Gemini enrichment failed for PMID=%s: %s", pmid, e)
+            try:
+                if 'raw_json' in locals() and raw_json:
+                    logger.debug("Gemini raw response (truncated) for PMID=%s: %s", pmid, raw_json[:500])
+            except Exception:  # noqa: BLE001
+                pass
             rec.setdefault("RelevanceScore", 0)
             rec.setdefault("WhyRelevant", f"Error during AI enrichment: {e}")
             rec.setdefault("StudySummary", "")
@@ -166,6 +234,7 @@ def gemini_enrich_records(
                     "scrna",
                     "snrna",
                     "multiome",
+                    "multi-omics"
                 ]
                 if any(k in methods_str for k in strong_keywords) or any(
                     k in key_findings_str for k in strong_keywords
