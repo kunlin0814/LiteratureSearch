@@ -133,7 +133,7 @@ def gemini_enrich_records(
     }
 
     SYSTEM_INSTRUCTION = (
-        "You are a PhD-level bioinformatics curator specializing in cancer biology, spatial and single-cell technologies, and computational methods. "
+        "You are a PhD-level bioinformatics curator specializing in cancer biology, spatial, single-cell, and multi-omics technologies, and computational methods. "
         "You will be given the text of a scientific paper (Abstract, Methods, Results, and Data/Code Availability). Extract structured fields."
     )
 
@@ -169,6 +169,7 @@ def gemini_enrich_records(
         "atac-seq",
         "cite-seq",
         "multiome",
+        "multi-omics",
         "cnv",
         "snrna-seq",
         "snatac-seq",

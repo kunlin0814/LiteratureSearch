@@ -62,19 +62,22 @@ def literature_search_flow(
     # Goal: Find `cfg["RETMAX"]` *new* papers.
     # We will try up to 3 extra times if we hit duplicates.
     
+    # 3. Smart Pagination Loop
+    # Goal: Find `cfg["RETMAX"]` *new* papers.
+    
     target_new_count = cfg["RETMAX"]
     new_pmids = []
     update_pmids = []
     all_esummary_results = {} # Accumulate esummary data for normalization
     
-    max_retries = 3
     current_retstart = 0
-    
-    # First fetch size is target
     current_fetch_size = target_new_count
+    max_pages = 50
+    page_count = 0
     
-    for attempt in range(max_retries + 1):
-        logger.info(f"--- Smart Search Attempt {attempt+1}/{max_retries+1} (Start={current_retstart}, Fetch={current_fetch_size}) ---")
+    while len(new_pmids) < target_new_count and current_retstart < count and page_count < max_pages:
+        page_count += 1
+        logger.info(f"--- Smart Search Page {page_count} (Start={current_retstart}, Fetch={current_fetch_size}) ---")
         
         # Fetch batch of metadata (eSummary)
         # Note: We use the history server, so we just need to advance retstart
@@ -129,15 +132,10 @@ def literature_search_flow(
         new_pmids.extend(batch_new)
         update_pmids.extend(batch_update)
         
-        logger.info(f"Batch result: {len(batch_new)} new, {len(batch_update)} existing.")
+        logger.info(f"Batch result: {len(batch_new)} new, {len(batch_update)} existing. Total new so far: {len(new_pmids)}")
         
-        if len(new_pmids) >= target_new_count:
-            logger.info(f"Found enough new papers ({len(new_pmids)} >= {target_new_count}). Stopping search.")
-            break
-            
-        # Prepare for next iteration
         current_retstart += this_batch_size
-        # For subsequent retries, fetch a fixed chunk (e.g., 30) to try to find more
+        # Increase fetch size for subsequent pages to scan faster
         current_fetch_size = 30
         
     # Trim to target if we over-fetched
@@ -197,16 +195,20 @@ def literature_search_flow(
         num_new_candidates = len(enriched_new)
         
         # Apply minimum relevance filter before creating Notion pages
-        min_relevance = 75
-        high_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) >= min_relevance]
-        low_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) < min_relevance]
+        # min_relevance = 75
+        # high_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) >= min_relevance]
+        # low_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) < min_relevance]
         
-        logger.info(
-            f"Gemini enrichment → {len(high_conf)} records with RelevanceScore ≥ {min_relevance}, "
-            f"{len(low_conf)} below threshold (kept out of Notion)."
-        )
+        # logger.info(
+        #     f"Gemini enrichment → {len(high_conf)} records with RelevanceScore ≥ {min_relevance}, "
+        #     f"{len(low_conf)} below threshold (kept out of Notion)."
+        # )
         
-        create_res = notion_create_pages(cfg, high_conf)
+        # create_res = notion_create_pages(cfg, high_conf)
+        
+        # CHANGED: Create ALL pages, even low relevance, to prevent infinite loop of re-processing.
+        logger.info(f"Gemini enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
+        create_res = notion_create_pages(cfg, enriched_new)
     else:
         create_res = {"created": 0}
 
