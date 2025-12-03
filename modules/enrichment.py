@@ -41,34 +41,64 @@ def _load_response_json(raw: str) -> Dict[str, Any]:
     # Try direct parsing first
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as e:
-        # Try to salvage the first complete JSON object
-        try:
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-        
-        # If that fails, try to find and extract just the JSON structure
-        # Look for balanced braces
-        brace_count = 0
-        start_idx = raw.find('{')
-        if start_idx != -1:
-            for i in range(start_idx, len(raw)):
-                if raw[i] == '{':
-                    brace_count += 1
-                elif raw[i] == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        try:
-                            return json.loads(raw[start_idx:i+1])
-                        except json.JSONDecodeError:
-                            pass
-                        break
-        
-        # Last resort: return empty dict and log the error
-        raise ValueError(f"Could not parse JSON from response. Original error: {e}")
+    except json.JSONDecodeError:
+        pass
+
+    # Try to salvage the first complete JSON object
+    try:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        pass
+    
+    # If that fails, try to find and extract just the JSON structure
+    # Look for balanced braces
+    brace_count = 0
+    start_idx = raw.find('{')
+    if start_idx != -1:
+        for i in range(start_idx, len(raw)):
+            if raw[i] == '{':
+                brace_count += 1
+            elif raw[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    try:
+                        return json.loads(raw[start_idx:i+1])
+                    except json.JSONDecodeError:
+                        pass
+                    break
+    
+    # Attempt to repair truncated JSON
+    # This is a best-effort heuristic for common truncation patterns
+    try:
+        # If it looks like a truncated string inside a JSON
+        # e.g. {"key": "valu
+        # We can try to close it.
+        repaired = raw.strip()
+        # If it doesn't end with '}', try to close the last open string and object
+        if not repaired.endswith('}'):
+            # Count quotes to see if we are inside a string
+            # This is a naive check, doesn't handle escaped quotes perfectly but might suffice
+            quote_count = repaired.count('"')
+            if quote_count % 2 == 1:
+                repaired += '"'
+            
+            # Count braces to see how many to close
+            open_braces = repaired.count('{')
+            close_braces = repaired.count('}')
+            repaired += '}' * (open_braces - close_braces)
+            
+            return json.loads(repaired)
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    # Last resort: return empty dict and log the error
+    # We re-raise to let the caller handle logging/fallback if they want, 
+    # or we can just raise ValueError as before.
+    # The original code raised ValueError with the original error.
+    # We will try to provide a helpful message.
+    raise ValueError(f"Could not parse JSON from response. Raw (first 500 chars): {raw[:500]}")
 
 
 @task(retries=3, retry_delay_seconds=5)
