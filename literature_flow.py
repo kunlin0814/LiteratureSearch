@@ -230,7 +230,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LiteratureSearch Prefect flow")
     parser.add_argument("--query", dest="query_term", type=str, default=None)
     parser.add_argument("--reldays", dest="rel_date_days", type=int, default=365)
-    parser.add_argument("--retmax", dest="retmax", type=int, default=220)
+    parser.add_argument("--retmax", dest="retmax", type=int, default=100)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
     parser.add_argument(
         "--tier",
