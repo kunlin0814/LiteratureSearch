@@ -34,7 +34,12 @@ def _extract_json_text(resp: Any) -> str:
 
 
 def _load_response_json(raw: str) -> Dict[str, Any]:
-    """Attempt to parse JSON even if Gemini wraps it in prose/code fences."""
+    """Attempt to parse JSON even if Gemini wraps it in prose/code fences.
+
+    If we have to repair obviously truncated JSON (unterminated string / braces),
+    we add a special marker key ``"__TRUNCATED__"`` so callers can downgrade
+    confidence or tag the record.
+    """
     if not raw:
         return {}
     
@@ -44,14 +49,14 @@ def _load_response_json(raw: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Try to salvage the first complete JSON object
+    # Try to salvage the first complete JSON object via regex (best-effort)
     try:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        match = re.search(r"\{.*?\}", raw, re.DOTALL)
         if match:
             return json.loads(match.group(0))
     except json.JSONDecodeError:
         pass
-    
+
     # If that fails, try to find and extract just the JSON structure
     # Look for balanced braces
     brace_count = 0
@@ -88,8 +93,12 @@ def _load_response_json(raw: str) -> Dict[str, Any]:
             open_braces = repaired.count('{')
             close_braces = repaired.count('}')
             repaired += '}' * (open_braces - close_braces)
-            
-            return json.loads(repaired)
+
+            obj = json.loads(repaired)
+            # Mark that we had to repair a truncation so callers can react.
+            if isinstance(obj, dict):
+                obj["__TRUNCATED__"] = True
+            return obj
     except (json.JSONDecodeError, Exception):
         pass
 
@@ -133,9 +142,23 @@ def gemini_enrich_records(
     }
 
     SYSTEM_INSTRUCTION = (
-        "You are a PhD-level bioinformatics curator specializing in cancer biology, spatial, single-cell, and multi-omics technologies, and computational methods. "
-        "You will be given the text of a scientific paper (Abstract, Methods, Results, and Data/Code Availability). Extract structured fields."
-    )
+    "You are a PhD-level bioinformatics curator specializing in cancer biology, "
+    "prostate cancer, spatial transcriptomics, single-cell genomics, and multi-omics methods. "
+    "Given paper text, return ONLY a JSON object matching the provided schema.\n\n"
+    "RelevanceScore rules:\n"
+    "- 0 = Not relevant (neither cancer nor spatial/single-cell/multi-omics).\n"
+    "- 30–60 = Weak: generic cancer OR generic omics method.\n"
+    "- 70–84 = Cancer-focused but limited spatial/single-cell/multi-omics.\n"
+    "- 85–94 = Prostate cancer + at least one key technology (scRNA/snrna, scATAC/snatac, multiome, Visium/Xenium/CosMx/GeoMx).\n"
+    "- 95–100 = Prostate cancer + both single-cell/multiome AND spatial technology.\n"
+    "- For non-prostate cancers, assign ≥75 only if ≥3 relevant technologies are clearly used.\n\n"
+    "WhyRelevant: 1 sentence explaining the score.\n"
+    "StudySummary: 2–3 sentences (aim, system/cohort, main result).\n"
+    "Methods: Experimental platforms + computational tools if stated.\n"
+    "KeyFindings: Concise bullet-like points in a single string separated by ';'.\n"
+    "DataTypes: Comma-separated assays; use controlled vocabulary when possible; empty string if not reported.\n\n"
+    "Missing info → empty string. No fabrication. Output compact JSON only."
+)
 
     try:
         model = genai.GenerativeModel(
@@ -195,7 +218,15 @@ def gemini_enrich_records(
             else:
                 text_to_analyze = f"Analysis based on Abstract:\n\n{abstract_text}"
         try:
-            resp = model.generate_content(f"Analyze this text for PMID {pmid}:\n\n{text_to_analyze}")
+            user_prompt = (
+            f"You will be given text associated with a scientific paper for PMID {pmid}.\n"
+            "Carefully read it and then fill the JSON fields exactly as specified in your system instructions.\n"
+            "Return ONLY the JSON object and nothing else.\n\n"
+            "TEXT_START\n"
+            f"{text_to_analyze}\n"
+            "TEXT_END"
+            )
+            resp = model.generate_content(user_prompt)
             raw_json = _extract_json_text(resp)
             parsed = _load_response_json(raw_json)
         except Exception as e:  # noqa: BLE001
@@ -215,6 +246,12 @@ def gemini_enrich_records(
             rec.setdefault("FullTextUsed", False)
             enriched.append(rec)
             continue
+
+        # If truncated-repair was needed, mark the title so it is easy to spot.
+        if parsed.pop("__TRUNCATED__", False):
+            title = str(rec.get("Title", ""))
+            if not title.startswith("trct-title:"):
+                rec["Title"] = f"trct-title: {title}" if title else "trct-title:"
 
         parsed.setdefault("RelevanceScore", 0)
         parsed.setdefault("WhyRelevant", "Analysis failed or returned empty.")
