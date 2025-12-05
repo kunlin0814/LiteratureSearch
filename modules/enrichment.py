@@ -162,7 +162,7 @@ def gemini_enrich_records(
 
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-2.5-pro",
             system_instruction=SYSTEM_INSTRUCTION,
             generation_config={
                 "temperature": 0.1,
