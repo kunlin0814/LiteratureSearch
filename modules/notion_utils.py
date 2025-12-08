@@ -108,6 +108,9 @@ def build_notion_page_properties(record: Dict[str, Any]) -> Dict[str, Any]:
     if "SRA_Project" in record and record["SRA_Project"]:
         props["SRA_Project"] = {"rich_text": [{"text": {"content": truncate_for_notion(record["SRA_Project"])}}]}
 
+    if "Group" in record and record["Group"]:
+        props["Group"] = {"rich_text": [{"text": {"content": truncate_for_notion(record["Group"])}}]}
+
     # Remove empty rich_text blocks
     for k in list(props.keys()):
         v = props[k]

@@ -130,6 +130,7 @@ def gemini_enrich_records(
             "Methods": {"type": "STRING"},
             "KeyFindings": {"type": "STRING"},
             "DataTypes": {"type": "STRING"},
+            "Group": {"type": "STRING"},
         },
         "required": [
             "RelevanceScore",
@@ -138,6 +139,7 @@ def gemini_enrich_records(
             "Methods",
             "KeyFindings",
             "DataTypes",
+            "Group",
         ],
     }
 
@@ -156,7 +158,11 @@ def gemini_enrich_records(
     "StudySummary: 2–3 sentences (aim, system/cohort, main result).\n"
     "Methods: Experimental platforms + computational tools if stated.\n"
     "KeyFindings: Concise bullet-like points in a single string separated by ';'.\n"
-    "DataTypes: Comma-separated assays; use controlled vocabulary when possible; empty string if not reported.\n\n"
+    "DataTypes: Comma-separated assays; use controlled vocabulary when possible; empty string if not reported.\n"
+    "Group: The 'Principal Investigator' or 'Lab Name'. Logic:\n"
+    "  1. If full text is provided, look for the 'Corresponding Author' or 'Correspondence to' section.\n"
+    "  2. If valid corresponding author found, use their Name (e.g. 'John Doe') or Lab Name (e.g. 'Doe Lab').\n"
+    "  3. If NO full text or NO corresponding author found, strictly use the LAST author from the provided Author list.\n\n"
     "Missing info → empty string. No fabrication. Output compact JSON only."
 )
 
@@ -217,15 +223,20 @@ def gemini_enrich_records(
                 text_to_analyze = "Title: " + str(rec.get("Title", "")) + "\n\n(No Abstract Available)"
             else:
                 text_to_analyze = f"Analysis based on Abstract:\n\n{abstract_text}"
+
+        # Add Authors to the prompt context
+        authors_str = rec.get("Authors", "") or "No authors listed"
+        
+        user_prompt = (
+        f"You will be given text associated with a scientific paper for PMID {pmid}.\n"
+        f"The authors listed for this paper are: {authors_str}\n"
+        "Carefully read the text and then fill the JSON fields exactly as specified in your system instructions.\n"
+        "Return ONLY the JSON object and nothing else.\n\n"
+        "TEXT_START\n"
+        f"{text_to_analyze}\n"
+        "TEXT_END"
+        )
         try:
-            user_prompt = (
-            f"You will be given text associated with a scientific paper for PMID {pmid}.\n"
-            "Carefully read it and then fill the JSON fields exactly as specified in your system instructions.\n"
-            "Return ONLY the JSON object and nothing else.\n\n"
-            "TEXT_START\n"
-            f"{text_to_analyze}\n"
-            "TEXT_END"
-            )
             resp = model.generate_content(user_prompt)
             raw_json = _extract_json_text(resp)
             parsed = _load_response_json(raw_json)
@@ -242,6 +253,7 @@ def gemini_enrich_records(
             rec.setdefault("Methods", "")
             rec.setdefault("KeyFindings", "")
             rec.setdefault("DataTypes", "")
+            rec.setdefault("Group", "")
             rec.setdefault("PipelineConfidence", "Low")
             rec.setdefault("FullTextUsed", False)
             enriched.append(rec)
@@ -259,6 +271,7 @@ def gemini_enrich_records(
         parsed.setdefault("Methods", "")
         parsed.setdefault("KeyFindings", "")
         parsed.setdefault("DataTypes", "")
+        parsed.setdefault("Group", "")
 
         raw_types = [
             t.strip().lower()
@@ -317,6 +330,7 @@ def gemini_enrich_records(
                 "Methods": parsed.get("Methods", ""),
                 "KeyFindings": parsed.get("KeyFindings", ""),
                 "DataTypes": parsed.get("DataTypes", ""),
+                "Group": parsed.get("Group", ""),
                 "PipelineConfidence": confidence,
                 "FullTextUsed": full_text_used,
             }
