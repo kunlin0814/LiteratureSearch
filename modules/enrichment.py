@@ -229,6 +229,7 @@ def gemini_enrich_records(
         
         user_prompt = (
         f"You will be given text associated with a scientific paper for PMID {pmid}.\n"
+        "Carefully read it and then fill the JSON fields exactly as specified in your system instructions.\n"
         f"The authors listed for this paper are: {authors_str}\n"
         "Carefully read the text and then fill the JSON fields exactly as specified in your system instructions.\n"
         "Return ONLY the JSON object and nothing else.\n\n"
