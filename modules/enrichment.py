@@ -3,6 +3,7 @@ import time
 import json
 import re
 from typing import Any, Dict, List
+from google.api_core.exceptions import ResourceExhausted
 
 import google.generativeai as genai
 from prefect import task, get_run_logger
@@ -241,6 +242,9 @@ def gemini_enrich_records(
             resp = model.generate_content(user_prompt)
             raw_json = _extract_json_text(resp)
             parsed = _load_response_json(raw_json)
+        except ResourceExhausted:
+            logger.error("Gemini Quota Exceeded (ResourceExhausted) for PMID=%s. STOPPING enriched processing.", pmid)
+            raise  # Re-raise to stop the flow
         except Exception as e:  # noqa: BLE001
             logger.warning("Gemini enrichment failed for PMID=%s: %s", pmid, e)
             try:

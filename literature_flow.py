@@ -191,24 +191,19 @@ def literature_search_flow(
     num_new_candidates = 0
     if to_create:
         logger.info(f"Running Gemini enrichment on {len(to_create)} new papers...")
-        enriched_new = gemini_enrich_records(to_create, abstracts_map, pmc_fulltext_map)
-        num_new_candidates = len(enriched_new)
+        from google.api_core.exceptions import ResourceExhausted
         
-        # Apply minimum relevance filter before creating Notion pages
-        # min_relevance = 75
-        # high_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) >= min_relevance]
-        # low_conf = [rec for rec in enriched_new if rec.get("RelevanceScore", 0) < min_relevance]
-        
-        # logger.info(
-        #     f"Gemini enrichment → {len(high_conf)} records with RelevanceScore ≥ {min_relevance}, "
-        #     f"{len(low_conf)} below threshold (kept out of Notion)."
-        # )
-        
-        # create_res = notion_create_pages(cfg, high_conf)
-        
-        # CHANGED: Create ALL pages, even low relevance, to prevent infinite loop of re-processing.
-        logger.info(f"Gemini enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
-        create_res = notion_create_pages(cfg, enriched_new)
+        try:
+            enriched_new = gemini_enrich_records(to_create, abstracts_map, pmc_fulltext_map)
+            num_new_candidates = len(enriched_new)
+            
+            # CHANGED: Create ALL pages, even low relevance, to prevent infinite loop of re-processing.
+            logger.info(f"Gemini enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
+            create_res = notion_create_pages(cfg, enriched_new)
+            
+        except ResourceExhausted:
+            logger.critical("Gemini quota exceeded during enrichment. Stopping flow immediately to avoid saving partial/error data.")
+            return
     else:
         create_res = {"created": 0}
 
