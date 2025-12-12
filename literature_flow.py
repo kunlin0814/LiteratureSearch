@@ -72,7 +72,7 @@ def literature_search_flow(
     
     current_retstart = 0
     current_fetch_size = target_new_count
-    max_pages = 50
+    max_pages = 30
     page_count = 0
     
     while len(new_pmids) < target_new_count and current_retstart < count and page_count < max_pages:
