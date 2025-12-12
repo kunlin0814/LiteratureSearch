@@ -136,7 +136,7 @@ def literature_search_flow(
         
         current_retstart += this_batch_size
         # Increase fetch size for subsequent pages to scan faster
-        current_fetch_size = 100
+        current_fetch_size = 50
         
     # Trim to target if we over-fetched
     new_pmids = new_pmids[:target_new_count]
