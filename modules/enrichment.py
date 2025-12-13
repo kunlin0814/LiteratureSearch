@@ -459,6 +459,6 @@ def ai_enrich_records(
             }
         )
         enriched.append(rec)
-        time.sleep(1)
+        time.sleep(0.5)
 
     return enriched

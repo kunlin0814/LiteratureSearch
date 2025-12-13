@@ -198,7 +198,7 @@ def literature_search_flow(
             num_new_candidates = len(enriched_new)
             
             # CHANGED: Create ALL pages, even low relevance, to prevent infinite loop of re-processing.
-            logger.info(f"AI enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
+            logger.info(f"AI enrichment -> {len(enriched_new)} records processed. Creating all in Notion.")
             create_res = notion_create_pages(cfg, enriched_new)
             
         except ResourceExhausted:
