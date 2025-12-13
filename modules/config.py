@@ -89,4 +89,6 @@ def get_config(
         "DRY_RUN": bool(dry_run) if dry_run is not None else False,
         "EUTILS_BATCH": 200,
         "EUTILS_TOOL": "prefect-litsearch",
+        "AI_PROVIDER": os.environ.get("AI_PROVIDER", "gemini").lower(),
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
     }

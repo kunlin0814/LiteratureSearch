@@ -11,6 +11,31 @@ from prefect import task, get_run_logger
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
 
+# Common prompt template used by both providers
+SYSTEM_INSTRUCTION = (
+    "You are a PhD-level bioinformatics curator specializing in cancer biology, "
+    "prostate cancer, spatial transcriptomics, single-cell genomics, and multi-omics methods. "
+    "Given paper text, return ONLY a JSON object matching the provided schema.\\n\\n"
+    "RelevanceScore rules:\\n"
+    "- 0 = Not relevant (neither cancer nor spatial/single-cell/multi-omics).\\n"
+    "- 30–60 = Weak: generic cancer OR generic omics method.\\n"
+    "- 70–84 = Cancer-focused but limited spatial/single-cell/multi-omics.\\n"
+    "- 85–94 = Prostate cancer + at least one key technology (scRNA/snrna, scATAC/snatac, multiome, Visium/Xenium/CosMx/GeoMx).\\n"
+    "- 95–100 = Prostate cancer + both single-cell/multiome AND spatial technology.\\n"
+    "- For non-prostate cancers, assign ≥75 only if ≥3 relevant technologies are clearly used.\\n\\n"
+    "WhyRelevant: 1 sentence explaining the score.\\n"
+    "StudySummary: 2–3 sentences (aim, system/cohort, main result).\\n"
+    "Methods: Experimental platforms + computational tools if stated.\\n"
+    "KeyFindings: Concise bullet-like points in a single string separated by ';'.\\n"
+    "DataTypes: Comma-separated assays; use controlled vocabulary when possible; empty string if not reported.\\n"
+    "Group: The 'Principal Investigator' or 'Lab Name'. Logic:\\n"
+    "  1. If full text is provided, look for the 'Corresponding Author' or 'Correspondence to' section.\\n"
+    "  2. If valid corresponding author found, use their Name (e.g. 'John Doe') or Lab Name (e.g. 'Doe Lab').\\n"
+    "  3. If NO full text or NO corresponding author found, strictly use the LAST author from the provided Author list.\\n\\n"
+    "Missing info → empty string. No fabrication. Output compact JSON only."
+)
+
+
 def _extract_json_text(resp: Any) -> str:
     """Pull best-effort JSON text out of a Gemini response."""
     raw = (getattr(resp, "text", None) or "").strip()
@@ -111,17 +136,8 @@ def _load_response_json(raw: str) -> Dict[str, Any]:
     raise ValueError(f"Could not parse JSON from response. Raw (first 500 chars): {raw[:500]}")
 
 
-@task(retries=3, retry_delay_seconds=5)
-def gemini_enrich_records(
-    records: List[Dict[str, Any]],
-    efetch_data: Dict[str, Dict[str, Any]],
-    pmc_fulltext_map: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    logger = get_run_logger()
-    if not os.environ.get("GOOGLE_API_KEY"):
-        logger.warning("GOOGLE_API_KEY not set; skipping Gemini enrichment.")
-        return records
-
+def _call_gemini_api(user_prompt: str, logger) -> Dict[str, Any]:
+    """Call Gemini API and return parsed JSON response."""
     response_schema = {
         "type": "OBJECT",
         "properties": {
@@ -143,42 +159,87 @@ def gemini_enrich_records(
             "Group",
         ],
     }
+    
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=SYSTEM_INSTRUCTION,
+        generation_config={
+            "temperature": 0.1,
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+        },
+    )
+    
+    resp = model.generate_content(user_prompt)
+    raw_json = _extract_json_text(resp)
+    
+    # Estimate output tokens
+    estimated_output_tokens = len(raw_json) // 4
+    
+    return _load_response_json(raw_json), estimated_output_tokens
 
-    SYSTEM_INSTRUCTION = (
-    "You are a PhD-level bioinformatics curator specializing in cancer biology, "
-    "prostate cancer, spatial transcriptomics, single-cell genomics, and multi-omics methods. "
-    "Given paper text, return ONLY a JSON object matching the provided schema.\n\n"
-    "RelevanceScore rules:\n"
-    "- 0 = Not relevant (neither cancer nor spatial/single-cell/multi-omics).\n"
-    "- 30–60 = Weak: generic cancer OR generic omics method.\n"
-    "- 70–84 = Cancer-focused but limited spatial/single-cell/multi-omics.\n"
-    "- 85–94 = Prostate cancer + at least one key technology (scRNA/snrna, scATAC/snatac, multiome, Visium/Xenium/CosMx/GeoMx).\n"
-    "- 95–100 = Prostate cancer + both single-cell/multiome AND spatial technology.\n"
-    "- For non-prostate cancers, assign ≥75 only if ≥3 relevant technologies are clearly used.\n\n"
-    "WhyRelevant: 1 sentence explaining the score.\n"
-    "StudySummary: 2–3 sentences (aim, system/cohort, main result).\n"
-    "Methods: Experimental platforms + computational tools if stated.\n"
-    "KeyFindings: Concise bullet-like points in a single string separated by ';'.\n"
-    "DataTypes: Comma-separated assays; use controlled vocabulary when possible; empty string if not reported.\n"
-    "Group: The 'Principal Investigator' or 'Lab Name'. Logic:\n"
-    "  1. If full text is provided, look for the 'Corresponding Author' or 'Correspondence to' section.\n"
-    "  2. If valid corresponding author found, use their Name (e.g. 'John Doe') or Lab Name (e.g. 'Doe Lab').\n"
-    "  3. If NO full text or NO corresponding author found, strictly use the LAST author from the provided Author list.\n\n"
-    "Missing info → empty string. No fabrication. Output compact JSON only."
-)
 
-    try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=SYSTEM_INSTRUCTION,
-            generation_config={
-                "temperature": 0.1,
-                "response_mime_type": "application/json",
-                "response_schema": response_schema,
-            },
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error("Model init failed: %s", e)
+def _call_openai_api(user_prompt: str, logger, model_name: str = "gpt-5-nano") -> Dict[str, Any]:
+    """Call OpenAI Chat Completions API and return parsed JSON response."""
+    from openai import OpenAI
+    
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    
+    # Newer 5-series models often enforce default temperature of 1.0
+    temperature = 1.0 if "gpt-5" in model_name else 0.1
+    
+    # Using stable Chat Completions API
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": user_prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=temperature
+    )
+    
+    raw_json = response.choices[0].message.content
+    
+    # Use actual token counts from OpenAI response
+    actual_output_tokens = response.usage.completion_tokens
+    
+    return json.loads(raw_json), actual_output_tokens
+
+
+@task(retries=2, retry_delay_seconds=30)
+def ai_enrich_records(
+    records: List[Dict[str, Any]],
+    efetch_data: Dict[str, Dict[str, Any]],
+    pmc_fulltext_map: Dict[str, Dict[str, Any]],
+    cfg: Dict[str, Any] = None,
+) -> List[Dict[str, Any]]:
+    logger = get_run_logger()
+    
+    # Get provider from config (default to gemini for backward compatibility)
+    if cfg is None:
+        from modules.config import get_config
+        cfg = get_config()
+    
+    provider = cfg.get("AI_PROVIDER", "gemini").lower()
+    
+    # Check API keys
+    if provider == "gemini":
+        if not os.environ.get("GOOGLE_API_KEY"):
+            logger.warning("GOOGLE_API_KEY not set; skipping enrichment.")
+            return records
+        logger.info("Using Gemini API for enrichment")
+    elif provider == "openai":
+        if not os.environ.get("OPENAI_API_KEY"):
+            logger.warning("OPENAI_API_KEY not set; skipping enrichment.")
+            return records
+        
+        # Configuration for Nano-First Strategy
+        DEFAULT_MODEL = "gpt-5-nano"
+        ESCALATION_MODEL = "gpt-5-mini"
+        logger.info(f"Using OpenAI API (Default: {DEFAULT_MODEL} -> Escalate: {ESCALATION_MODEL})")
+    else:
+        logger.error(f"Unknown AI_PROVIDER: {provider}. Use 'gemini' or 'openai'.")
         return records
 
     KNOWN_DATA_TYPES = {
@@ -208,50 +269,103 @@ def gemini_enrich_records(
     }
 
     enriched: List[Dict[str, Any]] = []
+    
+    # Token tracking for TPM monitoring
+    total_input_tokens = 0
+    total_output_tokens = 0
+    start_time = time.time()
+    
     for rec in records:
         pmid = str(rec.get("PMID", "")).strip()
         full_text_entry = pmc_fulltext_map.get(pmid)
         full_text_used = False
         if full_text_entry and full_text_entry.get("full_text"):
             text_to_analyze = (
-                "Analysis based on Full Text (Abstract + Methods + Results + Data/Code Availability):\n\n"
+                "Analysis based on Full Text (Abstract + Methods + Results + Data/Code Availability):\\n\\n"
                 + full_text_entry["full_text"]
             )
             full_text_used = True
         else:
             abstract_text = efetch_data.get(pmid, {}).get("Abstract", "")
             if not abstract_text:
-                text_to_analyze = "Title: " + str(rec.get("Title", "")) + "\n\n(No Abstract Available)"
+                text_to_analyze = "Title: " + str(rec.get("Title", "")) + "\\n\\n(No Abstract Available)"
             else:
-                text_to_analyze = f"Analysis based on Abstract:\n\n{abstract_text}"
+                text_to_analyze = f"Analysis based on Abstract:\\n\\n{abstract_text}"
 
         # Add Authors to the prompt context
         authors_str = rec.get("Authors", "") or "No authors listed"
         
         user_prompt = (
-        f"You will be given text associated with a scientific paper for PMID {pmid}.\n"
-        "Carefully read it and then fill the JSON fields exactly as specified in your system instructions.\n"
-        f"The authors listed for this paper are: {authors_str}\n"
-        "Carefully read the text and then fill the JSON fields exactly as specified in your system instructions.\n"
-        "Return ONLY the JSON object and nothing else.\n\n"
-        "TEXT_START\n"
-        f"{text_to_analyze}\n"
+        f"You will be given text associated with a scientific paper for PMID {pmid}.\\n"
+        "Carefully read it and then fill the JSON fields exactly as specified in your system instructions.\\n"
+        f"The authors listed for this paper are: {authors_str}\\n"
+        "Carefully read the text and then fill the JSON fields exactly as specified in your system instructions.\\n"
+        "Return ONLY the JSON object and nothing else.\\n\\n"
+        "TEXT_START\\n"
+        f"{text_to_analyze}\\n"
         "TEXT_END"
         )
+        
+        # Estimate token usage (rough approximation: 1 token ≈ 4 characters)
+        estimated_input_tokens = len(user_prompt) // 4
+        total_input_tokens += estimated_input_tokens
+        elapsed_minutes = (time.time() - start_time) / 60.0 or 0.01
+        tokens_per_minute = total_input_tokens / elapsed_minutes
+        
+        logger.info(
+            f"PMID {pmid}: ~{estimated_input_tokens:,} input tokens | "
+            f"Cumulative: {total_input_tokens:,} tokens in {elapsed_minutes:.2f} min "
+            f"(~{tokens_per_minute:,.0f} TPM)"
+        )
+        
         try:
-            resp = model.generate_content(user_prompt)
-            raw_json = _extract_json_text(resp)
-            parsed = _load_response_json(raw_json)
-        except ResourceExhausted:
-            logger.error("Gemini Quota Exceeded (ResourceExhausted) for PMID=%s. STOPPING enriched processing.", pmid)
+            # Route to the appropriate provider with Escalation Logic
+            if provider == "gemini":
+                parsed, output_tokens = _call_gemini_api(user_prompt, logger)
+            else:  # openai
+                # Try 1: Default Model (Nano)
+                try:
+                    parsed, output_tokens = _call_openai_api(user_prompt, logger, model_name=DEFAULT_MODEL)
+                    
+                    # Escalation Check
+                    rel_score = parsed.get("RelevanceScore", 0)
+                    needs_escalation = False
+                    
+                    # Trigger 1: Ambiguous Score (70-85)
+                    if 70 <= rel_score <= 85:
+                        needs_escalation = True
+                        logger.warning(f"PMID {pmid}: Ambiguous score ({rel_score}) with {DEFAULT_MODEL}. Escalating...")
+                        
+                    # Trigger 2: Parsing Failure or Empty (Handled by exception/defaults usually, but check parsed dict)
+                    if not parsed or parsed.get("WhyRelevant") == "Analysis failed or returned empty.":
+                        needs_escalation = True
+                        
+                    if needs_escalation:
+                         # Try 2: Escalation Model (Mini)
+                         logger.info(f"🚀 Escalating PMID {pmid} to {ESCALATION_MODEL} for better reasoning...")
+                         parsed, output_tokens = _call_openai_api(user_prompt, logger, model_name=ESCALATION_MODEL)
+                         
+                except Exception as e:
+                    # If Nano fails completely (e.g. JSON error), try Escalation Model
+                    logger.warning(f"PMID {pmid}: Failed with {DEFAULT_MODEL} ({e}). Escalating to {ESCALATION_MODEL}...")
+                    parsed, output_tokens = _call_openai_api(user_prompt, logger, model_name=ESCALATION_MODEL)
+
+            total_output_tokens += output_tokens
+            
+        except ResourceExhausted as e:
+            # Extract quota error details if available
+            error_details = str(e)
+            logger.error(
+                f"⚠️  {provider.upper()} QUOTA EXCEEDED for PMID={pmid}\\n"
+                f"Error Details: {error_details}\\n"
+                f"Current Usage: {total_input_tokens:,} input tokens + {total_output_tokens:,} output tokens\\n"
+                f"Time Elapsed: {elapsed_minutes:.2f} minutes ({tokens_per_minute:,.0f} tokens/min)\\n"
+                f"Likely Cause: {'TPM limit (1M tokens/min)' if tokens_per_minute > 900000 else 'Daily quota or other limit'}\\n"
+                f"STOPPING pipeline to prevent Notion database corruption."
+            )
             raise  # Re-raise to stop the flow
         except Exception as e:  # noqa: BLE001
-            logger.warning("Gemini enrichment failed for PMID=%s: %s", pmid, e)
-            try:
-                if 'raw_json' in locals() and raw_json:
-                    logger.debug("Gemini raw response (truncated) for PMID=%s: %s", pmid, raw_json[:500])
-            except Exception:  # noqa: BLE001
-                pass
+            logger.warning(f"{provider.upper()} enrichment failed completely for PMID=%s: %s", pmid, e)
             rec.setdefault("RelevanceScore", 0)
             rec.setdefault("WhyRelevant", f"Error during AI enrichment: {e}")
             rec.setdefault("StudySummary", "")
@@ -326,6 +440,10 @@ def gemini_enrich_records(
                     k in key_findings_str for k in strong_keywords
                 ):
                     confidence = "Medium"
+        
+        # Check if escalaction improved things or if we still have low confidence
+        if provider == "openai" and relevance_score <= 85 and relevance_score >= 70:
+             confidence = "Medium-Ambiguous" # Mark as ambiguous but potentially handled by escalation
 
         rec.update(
             {

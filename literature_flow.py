@@ -5,7 +5,7 @@ This file now only coordinates tasks imported from modules:
 - pubmed_tasks.*
 - validation_tasks.*
 - normalization.normalize_records
-- enrichment.gemini_enrich_records
+- enrichment.ai_enrich_records
 - notion_tasks.*
 """
 
@@ -21,7 +21,7 @@ from modules.pubmed_tasks import (
 )
 from modules.validation_tasks import validate_results
 from modules.normalization import normalize_records
-from modules.enrichment import gemini_enrich_records
+from modules.enrichment import ai_enrich_records
 from modules.notion_tasks import (
     notion_build_index,
     notion_create_pages,
@@ -190,19 +190,19 @@ def literature_search_flow(
     # 7. Enrich NEW papers
     num_new_candidates = 0
     if to_create:
-        logger.info(f"Running Gemini enrichment on {len(to_create)} new papers...")
+        logger.info(f"Running AI enrichment on {len(to_create)} new papers...")
         from google.api_core.exceptions import ResourceExhausted
         
         try:
-            enriched_new = gemini_enrich_records(to_create, abstracts_map, pmc_fulltext_map)
+            enriched_new = ai_enrich_records(to_create, abstracts_map, pmc_fulltext_map, cfg)
             num_new_candidates = len(enriched_new)
             
             # CHANGED: Create ALL pages, even low relevance, to prevent infinite loop of re-processing.
-            logger.info(f"Gemini enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
+            logger.info(f"AI enrichment → {len(enriched_new)} records processed. Creating all in Notion.")
             create_res = notion_create_pages(cfg, enriched_new)
             
         except ResourceExhausted:
-            logger.critical("Gemini quota exceeded during enrichment. Stopping flow immediately to avoid saving partial/error data.")
+            logger.critical("AI quota exceeded during enrichment. Stopping flow immediately to avoid saving partial/error data.")
             return
     else:
         create_res = {"created": 0}
