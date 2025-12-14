@@ -12,7 +12,7 @@ This file now only coordinates tasks imported from modules:
 from typing import Optional
 from prefect import flow, get_run_logger
 
-from modules.config import get_config
+from modules.config import get_config, validate_config
 from modules.pubmed_tasks import (
     pubmed_esearch,
     pubmed_esummary_history,
@@ -45,6 +45,9 @@ def literature_search_flow(
         dry_run=dry_run,
         tier=tier,
     )
+    
+    # Strict validation - fail fast if credentials are missing
+    validate_config(cfg, logger)
 
     # 1. Build Notion Index FIRST
     index = notion_build_index(cfg)
@@ -225,7 +228,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LiteratureSearch Prefect flow")
     parser.add_argument("--query", dest="query_term", type=str, default=None)
     parser.add_argument("--reldays", dest="rel_date_days", type=int, default=365)
-    parser.add_argument("--retmax", dest="retmax", type=int, default=100)
+    parser.add_argument("--retmax", dest="retmax", type=int, default=30)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
     parser.add_argument(
         "--tier",
