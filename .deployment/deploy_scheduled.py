@@ -12,7 +12,9 @@ if __name__ == "__main__":
     
     # Add .deployment directory to path so we can import biweekly_flow
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, script_dir)
+    parent_dir = os.path.dirname(script_dir)  # Root directory
+    sys.path.insert(0, script_dir)  # For biweekly_flow
+    sys.path.insert(0, parent_dir)  # For literature_flow, modules, etc.
     
     # Import the biweekly wrapper flow
     from biweekly_flow import biweekly_literature_search_flow
