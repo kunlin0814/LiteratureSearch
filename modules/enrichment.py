@@ -391,8 +391,8 @@ def ai_enrich_records(
                     rel_score = parsed.get("RelevanceScore", 0)
                     needs_escalation = False
                     
-                    # Trigger 1: Ambiguous Score (70-80)
-                    if 70 <= rel_score <= 80:
+                    # Trigger 1: Ambiguous Score (70-84) - matches "limited spatial/single-cell" tier
+                    if 70 <= rel_score <= 84:
                         needs_escalation = True
                         logger.warning(f"PMID {pmid}: Ambiguous score ({rel_score}) with {DEFAULT_MODEL}. Escalating...")
                         

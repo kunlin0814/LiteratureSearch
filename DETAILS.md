@@ -236,7 +236,7 @@ When using OpenAI, the pipeline implements a cost-optimized escalation strategy:
 
 1. **Primary Model:** GPT-5-nano (cheapest, ~$0.10/1M tokens)
 2. **Escalation Triggers:**
-   - Ambiguous relevance score (70-80)
+   - Ambiguous relevance score (70-84)
    - JSON parsing failure
    - Low confidence result
 3. **Escalation Model:** GPT-5-mini (better reasoning, ~$0.20/1M tokens)

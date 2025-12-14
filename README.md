@@ -36,7 +36,7 @@ Searches PubMed, extracts metadata and full text (when available), enriches with
 - **Gemini**: gemini-2.5-flash with enforced JSON schema
 - **OpenAI**: Nano-First strategy with automatic escalation
   - Default: `gpt-5-nano` ($0.05/1M tokens)
-  - Auto-escalate to `gpt-5-mini` ($0.25/1M tokens) for ambiguous scores (70-80)
+  - Auto-escalate to `gpt-5-mini` ($0.25/1M tokens) for ambiguous scores (70-84)
 - Extracts: `RelevanceScore` (0–100), `StudySummary`, `Methods`, `KeyFindings`, `DataTypes`, `Group`
 - Temperature optimized per provider (1.0 for GPT-5 models, 0.1 for others)
 
@@ -111,7 +111,7 @@ python literature_flow.py --dry-run
 **Nano-First Strategy:**
 - Primary: `gpt-5-nano` processes all papers initially
 - Escalation triggers:
-  - Ambiguous relevance score (70-80)
+  - Ambiguous relevance score (70-84)
   - JSON parsing failures
   - Low confidence results
 - Escalation target: `gpt-5-mini` for better reasoning
@@ -142,7 +142,7 @@ graph TD
     G -->|Yes| H{AI Provider?}
     H -->|OpenAI| I[Try gpt-5-nano]
     H -->|Gemini| J[Gemini Enrichment]
-    I --> K{Score 70-80?}
+    I --> K{Score 70-84?}
     K -->|Yes| L[Escalate to gpt-5-mini]
     K -->|No| M[Accept Result]
     L --> M
@@ -228,7 +228,7 @@ Pipeline automatically stops on quota errors to prevent corrupted Notion data. C
 **Escalation Not Triggering:**
 
 Escalation only occurs when:
-- `RelevanceScore` is between 70-80 (ambiguous zone)
+- `RelevanceScore` is between 70-84 (ambiguous zone)
 - JSON parsing fails on first attempt
 - Result marked as low confidence
 
