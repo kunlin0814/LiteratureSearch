@@ -180,31 +180,84 @@ def _call_gemini_api(user_prompt: str, logger) -> Dict[str, Any]:
 
 
 def _call_openai_api(user_prompt: str, logger, model_name: str = "gpt-5-nano") -> Dict[str, Any]:
-    """Call OpenAI Chat Completions API and return parsed JSON response."""
+    """Call OpenAI Chat Completions API with strict schema enforcement."""
     from openai import OpenAI
     
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    # Fail-fast if API key is missing
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     
-    # Newer 5-series models often enforce default temperature of 1.0
-    temperature = 1.0 if "gpt-5" in model_name else 0.1
+    # Define strict JSON schema matching Gemini's response_schema
+    json_schema = {
+        "name": "paper_enrichment_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "RelevanceScore": {
+                    "type": "integer",
+                    "description": "Relevance score from 0-100"
+                },
+                "WhyRelevant": {
+                    "type": "string",
+                    "description": "1 sentence explaining the score"
+                },
+                "StudySummary": {
+                    "type": "string",
+                    "description": "2-3 sentences about aim, system/cohort, main result"
+                },
+                "Methods": {
+                    "type": "string",
+                    "description": "Experimental platforms and computational tools"
+                },
+                "KeyFindings": {
+                    "type": "string",
+                    "description": "Concise bullet-like points separated by ;"
+                },
+                "DataTypes": {
+                    "type": "string",
+                    "description": "Comma-separated assays"
+                },
+                "Group": {
+                    "type": "string",
+                    "description": "Principal Investigator or Lab Name"
+                }
+            },
+            "required": [
+                "RelevanceScore",
+                "WhyRelevant",
+                "StudySummary",
+                "Methods",
+                "KeyFindings",
+                "DataTypes",
+                "Group"
+            ],
+            "additionalProperties": False
+        }
+    }
     
-    # Using stable Chat Completions API
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
+    # Build API parameters
+    params = {
+        "model": model_name,
+        "messages": [
             {"role": "system", "content": SYSTEM_INSTRUCTION},
             {"role": "user", "content": user_prompt}
         ],
-        response_format={"type": "json_object"},
-        temperature=temperature
-    )
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": json_schema
+        }
+    }
+    
+    # Only non-GPT-5 models support custom temperature
+    if not model_name.startswith("gpt-5"):
+        params["temperature"] = 0.1
+    
+    response = client.chat.completions.create(**params)
     
     raw_json = response.choices[0].message.content
+    output_tokens = response.usage.completion_tokens
     
-    # Use actual token counts from OpenAI response
-    actual_output_tokens = response.usage.completion_tokens
-    
-    return json.loads(raw_json), actual_output_tokens
+    return json.loads(raw_json), output_tokens
 
 
 @task(retries=2, retry_delay_seconds=30)
@@ -331,8 +384,8 @@ def ai_enrich_records(
                     rel_score = parsed.get("RelevanceScore", 0)
                     needs_escalation = False
                     
-                    # Trigger 1: Ambiguous Score (70-85)
-                    if 70 <= rel_score <= 85:
+                    # Trigger 1: Ambiguous Score (70-80)
+                    if 70 <= rel_score <= 80:
                         needs_escalation = True
                         logger.warning(f"PMID {pmid}: Ambiguous score ({rel_score}) with {DEFAULT_MODEL}. Escalating...")
                         
@@ -342,7 +395,7 @@ def ai_enrich_records(
                         
                     if needs_escalation:
                          # Try 2: Escalation Model (Mini)
-                         logger.info(f"🚀 Escalating PMID {pmid} to {ESCALATION_MODEL} for better reasoning...")
+                         logger.info(f"Escalating PMID {pmid} to {ESCALATION_MODEL} for better reasoning...")
                          parsed, output_tokens = _call_openai_api(user_prompt, logger, model_name=ESCALATION_MODEL)
                          
                 except Exception as e:
@@ -356,7 +409,7 @@ def ai_enrich_records(
             # Extract quota error details if available
             error_details = str(e)
             logger.error(
-                f"⚠️  {provider.upper()} QUOTA EXCEEDED for PMID={pmid}\\n"
+                f"{provider.upper()} QUOTA EXCEEDED for PMID={pmid}\\n"
                 f"Error Details: {error_details}\\n"
                 f"Current Usage: {total_input_tokens:,} input tokens + {total_output_tokens:,} output tokens\\n"
                 f"Time Elapsed: {elapsed_minutes:.2f} minutes ({tokens_per_minute:,.0f} tokens/min)\\n"

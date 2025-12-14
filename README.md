@@ -193,7 +193,7 @@ graph TD
 
 ### Rate Limiting
 
-Current setting: `time.sleep(0.5)` between API calls (~100-120 RPM)
+Current setting: `time.sleep(0.3)` between API calls (~100-120 RPM)
 
 Safe for OpenAI's 500 RPM limit. Adjust in `modules/enrichment.py` if needed.
 
@@ -228,7 +228,7 @@ Pipeline automatically stops on quota errors to prevent corrupted Notion data. C
 **Escalation Not Triggering:**
 
 Escalation only occurs when:
-- `RelevanceScore` is between 70-85 (ambiguous zone)
+- `RelevanceScore` is between 70-80 (ambiguous zone)
 - JSON parsing fails on first attempt
 - Result marked as low confidence
 
