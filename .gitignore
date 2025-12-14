@@ -1,0 +1,21 @@
+.env
+__pycache__
+*.pyc
+.venv
+
+# Runtime generated files
+run_history.csv
+*.log
+*.csv
+results/
+figures/
+*.json.bak
+
+# Environment
+.env
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+ore
