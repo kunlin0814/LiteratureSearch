@@ -13,15 +13,7 @@ from prefect import flow, get_run_logger
 from literature_flow import literature_search_flow as base_flow
 
 
-def is_biweekly_run() -> bool:
-    """
-    Determine if today is a biweekly run.
-    Uses ISO week number: run on odd weeks.
-    """
-    today = datetime.now()
-    week_number = today.isocalendar()[1]
-    is_odd_week = (week_number % 2) == 1
-    return is_odd_week
+
 
 
 @flow(name="Biweekly-Literature-Search")
@@ -47,16 +39,7 @@ def biweekly_literature_search_flow(
     """
     logger = get_run_logger()
     
-    # Check if this is a biweekly run (only run on odd ISO weeks)
-    if not is_biweekly_run():
-        logger.info("Skipping run - this is NOT a biweekly Monday (even week number)")
-        return {
-            "status": "skipped",
-            "reason": "Not a biweekly Monday",
-            "week_number": datetime.now().isocalendar()[1]
-        }
-    
-    logger.info(f"✅ Biweekly run confirmed - ISO Week {datetime.now().isocalendar()[1]} (odd)")
+    logger.info(f"✅ Biweekly run started")
     logger.info(f"Target: {max_results} new papers, Max retries: {max_retries}")
     
     # Track attempts
@@ -153,20 +136,10 @@ if __name__ == "__main__":
         default=1,
         help="1=prostate focused (default), 2=broader cancer"
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force run even if not biweekly Monday"
-    )
     
     args = parser.parse_args()
     
     # Override biweekly check if --force flag is used
-    if args.force:
-        original_check = is_biweekly_run
-        def force_biweekly():
-            return True
-        is_biweekly_run = force_biweekly
     
     result = biweekly_literature_search_flow(
         max_results=args.max_results,

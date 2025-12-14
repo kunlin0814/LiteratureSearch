@@ -18,7 +18,7 @@ if __name__ == "__main__":
     
     # Import the biweekly wrapper flow
     from biweekly_flow import biweekly_literature_search_flow
-    from prefect.client.schemas.schedules import CronSchedule
+    from prefect.client.schemas.schedules import RRuleSchedule
     
     # Define the GitHub source
     # This tells Prefect to clone this repo before running
@@ -32,8 +32,10 @@ if __name__ == "__main__":
     deployment_id = flow_from_source.deploy(
         name="biweekly-literature-search",
         work_pool_name="literature-managed-pool",
-        schedule=CronSchedule(
-            cron="0 7 * * 1",  # Every Monday at 7:00 AM
+        schedule=RRuleSchedule(
+            # Recurrence Rule: Every 2 weeks on Monday at 7:00 AM
+            # DTSTART sets the first run and anchor time
+            rrule="DTSTART:20251215T070000\nFREQ=WEEKLY;INTERVAL=2;BYDAY=MO",
             timezone="America/New_York"
         ),
         tags=["literature", "biweekly", "automated"],
