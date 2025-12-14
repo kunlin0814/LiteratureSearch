@@ -416,27 +416,18 @@ def ai_enrich_records(
             # Extract quota error details if available
             error_details = str(e)
             logger.error(
-                f"{provider.upper()} QUOTA EXCEEDED for PMID={pmid}\\n"
-                f"Error Details: {error_details}\\n"
-                f"Current Usage: {total_input_tokens:,} input tokens + {total_output_tokens:,} output tokens\\n"
-                f"Time Elapsed: {elapsed_minutes:.2f} minutes ({tokens_per_minute:,.0f} tokens/min)\\n"
-                f"Likely Cause: {'TPM limit (1M tokens/min)' if tokens_per_minute > 900000 else 'Daily quota or other limit'}\\n"
+                f"{provider.upper()} QUOTA EXCEEDED for PMID={pmid}\n"
+                f"Error Details: {error_details}\n"
+                f"Current Usage: {total_input_tokens:,} input tokens + {total_output_tokens:,} output tokens\n"
+                f"Time Elapsed: {elapsed_minutes:.2f} minutes ({tokens_per_minute:,.0f} tokens/min)\n"
+                f"Likely Cause: {'TPM limit (1M tokens/min)' if tokens_per_minute > 900000 else 'Daily quota or other limit'}\n"
                 f"STOPPING pipeline to prevent Notion database corruption."
             )
             raise  # Re-raise to stop the flow
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"{provider.upper()} enrichment failed completely for PMID=%s: %s", pmid, e)
-            rec.setdefault("RelevanceScore", 0)
-            rec.setdefault("WhyRelevant", f"Error during AI enrichment: {e}")
-            rec.setdefault("StudySummary", "")
-            rec.setdefault("Methods", "")
-            rec.setdefault("KeyFindings", "")
-            rec.setdefault("DataTypes", "")
-            rec.setdefault("Group", "")
-            rec.setdefault("PipelineConfidence", "Low")
-            rec.setdefault("FullTextUsed", False)
-            enriched.append(rec)
-            continue
+            
+        # NOTE: We deliberately removed the generic 'except Exception' block here.
+        # We WANT the pipeline to crash if there's a JSON parsing error or API error,
+        # so that we don't write bad/empty data to Notion.
 
         # If truncated-repair was needed, mark the title so it is easy to spot.
         if parsed.pop("__TRUNCATED__", False):
