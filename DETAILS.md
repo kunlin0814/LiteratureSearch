@@ -474,9 +474,10 @@ python literature_flow.py --tier 1 --retmax 50
   - Automatic retries with backoff for HTTP 429 and 5xx from NCBI/Notion.
 - **Notion 429**:
   - Respects `Retry-After` header when present.
-- **Gemini errors**:
-  - Per-article failures are caught and logged.
-  - The record is still created/updated in Notion without enrichment rather than being dropped.
+- **Gemini/OpenAI errors**:
+  - **Strict Fail-Safe**: The pipeline **STOPS immediately** on any AI error (JSON parsing, API 500, etc.).
+  - This prevents "empty" or corrupted records from being written to Notion.
+  - Fix the error or check credentials, then re-run.
 - Prefect logging can be increased via:
 
 
