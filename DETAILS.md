@@ -1,6 +1,6 @@
 # Literature Search & Triage Pipeline – Technical Details
 
-**Automated PubMed → Gemini → Notion pipeline for prostate cancer spatial biology and cancer single-cell / spatial-omics research.**
+**Automated PubMed → AI (Gemini/OpenAI) → Notion pipeline for prostate cancer spatial biology and cancer single-cell / spatial-omics research.**
 
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![Prefect](https://img.shields.io/badge/prefect-3.x-orange)
@@ -22,8 +22,9 @@ It:
 
 1. **Searches PubMed** using tiered queries targeting spatial transcriptomics, single-cell, and PCa/cancer biology.  
 2. **Enriches metadata** (GEO/SRA accessions, MeSH, abstracts) via NCBI E-Utilities.  
-3. Uses **Google Gemini 2.5 Flash (native JSON mode)** to score relevance (0–100) and extract structured summaries.  
+3. Uses **AI models (Gemini 2.5 Flash or OpenAI GPT)** with strict JSON schema to score relevance (0–100) and extract structured summaries.  
 4. **Syncs to Notion** with deduplication and cost-aware AI enrichment.
+5. **Automated biweekly execution** via Prefect Cloud (optional).
 
 ---
 
@@ -183,7 +184,81 @@ A **`DedupeKey`** is assigned:
 
 ---
 
-## 🤖 Gemini Enrichment (Native JSON Mode)
+## 🤖 AI Enrichment (Multi-Provider Support)
+
+### Supported Providers
+
+The pipeline supports two AI providers via `config.yaml`:
+
+```yaml
+AI_PROVIDER: "gemini"  # or "openai"
+```
+
+- **Gemini 2.5 Flash** (default)
+  - Native JSON mode with strict schema enforcement
+  - Free tier: ~20 requests/day
+  - Temperature: 0.1 (configurable)
+  
+- **OpenAI GPT Models**
+  - GPT-5-nano (default), GPT-5-mini (escalation)
+  - Structured outputs with JSON schema
+  - Temperature: GPT-4.x supports 0.1, GPT-5 fixed at 1.0
+
+### Strict JSON Schema Enforcement
+
+Both providers use strict schema validation to ensure consistent output:
+
+**Gemini:**
+```python
+response_schema = {
+    "type": "OBJECT",
+    "properties": {...},
+    "required": [...]
+}
+```
+
+**OpenAI:**
+```python
+response_format = {
+    "type": "json_schema",
+    "json_schema": {
+        "strict": True,
+        "schema": {...}
+    }
+}
+```
+
+This eliminates JSON parsing errors and guarantees all required fields are present.
+
+### OpenAI Nano-First Escalation Strategy
+
+When using OpenAI, the pipeline implements a cost-optimized escalation strategy:
+
+1. **Primary Model:** GPT-5-nano (cheapest, ~$0.10/1M tokens)
+2. **Escalation Triggers:**
+   - Ambiguous relevance score (70-80)
+   - JSON parsing failure
+   - Low confidence result
+3. **Escalation Model:** GPT-5-mini (better reasoning, ~$0.20/1M tokens)
+
+This ensures quality while minimizing costs—typically ~80% of papers use nano, ~20% escalate to mini.
+
+### API Client Reuse Optimization
+
+**Performance Improvement:** Both provider clients are initialized once at module load and reused across all API calls:
+
+```python
+# Module-level initialization (enrichment.py)
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+_OPENAI_CLIENT = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+```
+
+**Benefits:**
+- Eliminates redundant client creation (100+ papers/run)
+- Better HTTP connection pooling
+- Faster batch processing
+
+
 
 ### System Instruction (Conceptual Summary)
 
@@ -358,15 +433,40 @@ Key configuration variables (from code + `.env` + CLI):
 
 ## 🗓️ Scheduling & Automation
 
-### Simple Cron
+### Automated Biweekly Execution (Prefect Cloud)
 
-Example weekly cron job:
+**Admin Setup:** The pipeline includes automated scheduling via Prefect Cloud (free tier):
 
+- **Schedule:** Every other Monday at 7:00 AM EST
+- **Target:** Fetch 25 new papers per run
+- **Retry Logic:** Up to 3 attempts if fewer papers found
+- **Serverless:** Runs in Prefect Cloud (no local computer needed)
+
+**Configuration:** See `.deployment/` directory for admin setup scripts.
+
+**Management Commands:**
 ```bash
-0 6 * * 1 cd /path/to/API_WF && /path/to/venv/bin/python Prefect_literatureSearch.py --tier 1 >> run.log 2>&1
+# Pause automation
+prefect deployment pause Biweekly-Literature-Search/biweekly-literature-search
+
+# Resume automation
+prefect deployment resume Biweekly-Literature-Search/biweekly-literature-search
+
+# Check status
+prefect deployment ls
 ```
 
-You can run Tier 2 on a separate schedule if desired.
+### Manual Execution (Simple Cron)
+
+Alternatively, run manually or via cron:
+
+```bash
+# Weekly manual run
+python literature_flow.py --tier 1 --retmax 50
+
+# Cron example (every Monday 6 AM)
+0 6 * * 1 cd /path/to/API_WF && python literature_flow.py --tier 1 >> run.log 2>&1
+```
 
 ## 🚨 Error Handling & Retries
 
@@ -390,7 +490,10 @@ Approximate usage under typical academic settings:
 |-----------------------|-----------------------------------|---------------------------|----------------|
 | **NCBI E-Utilities**  | 10 req/sec with key              | ~400 requests/run         | Free           |
 | **Gemini 2.5 Flash**  | ~15 RPM, ~1500 RPD (varies)      | ~1 request/new paper      | Free (for <1500 new papers/day) |
+| **OpenAI GPT-5-nano** | 500 RPM limit                    | ~1 request/new paper      | ~$0.10/1M tokens |
+| **OpenAI GPT-5-mini** | 500 RPM limit                    | Escalation only (~20%)    | ~$0.20/1M tokens |
 | **Notion API**        | Reads free; ~3 writes/sec        | O(100–300) writes/run     | Free           |
+| **Prefect Cloud**     | 20K runs/month free              | ~2 runs/month (biweekly)  | Free           |
 
 For normal PCa/spatial search frequency (weekly/biweekly), this is effectively **$0/month**.
 
