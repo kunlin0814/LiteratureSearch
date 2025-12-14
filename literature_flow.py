@@ -12,7 +12,7 @@ This file now only coordinates tasks imported from modules:
 from typing import Optional
 from prefect import flow, get_run_logger
 
-from modules.config import get_config, validate_config
+from modules.config import get_config
 from modules.pubmed_tasks import (
     pubmed_esearch,
     pubmed_esummary_history,
@@ -27,6 +27,7 @@ from modules.notion_tasks import (
     notion_create_pages,
     notion_update_pages,
 )
+from modules.run_log import append_run_log
 
 
 @flow(name="LiteratureSearch-Prefect")
@@ -45,9 +46,6 @@ def literature_search_flow(
         dry_run=dry_run,
         tier=tier,
     )
-    
-    # Strict validation - fail fast if credentials are missing
-    validate_config(cfg, logger)
 
     # 1. Build Notion Index FIRST
     index = notion_build_index(cfg)
@@ -220,6 +218,18 @@ def literature_search_flow(
     logger.info(
         f"Summary → total_found={count}, new_selected={num_new_candidates}, existing_updated={len(to_update_final)}, "
         f"created={create_res.get('created', 0)}, updated={update_res.get('updated', 0)}"
+    )
+    append_run_log(
+        cfg,
+        {
+            "tier": tier,
+            "total_found": count,
+            "new_selected": num_new_candidates,
+            "existing_updates": len(to_update_final),
+            "created": create_res.get("created", 0),
+            "updated": update_res.get("updated", 0),
+            "notes": "flow complete",
+        },
     )
 
 

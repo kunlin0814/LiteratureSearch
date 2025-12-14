@@ -1,8 +1,43 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class ConfigError(ValueError):
+    """Raised when mandatory configuration is missing."""
+
+
+def _validate_config(cfg: Dict[str, Any]) -> None:
+    """Fail fast when key credentials/configuration are missing."""
+
+    errors: List[str] = []
+
+    def require(value: Any, message: str) -> None:
+        if not value:
+            errors.append(message)
+
+    require(cfg.get("EMAIL"), "NCBI_EMAIL is required for PubMed API usage.")
+    require(cfg.get("NCBI_API_KEY"), "NCBI_API_KEY is required for stable PubMed access.")
+
+    if not cfg.get("DRY_RUN"):
+        require(cfg.get("NOTION_TOKEN"), "NOTION_TOKEN is required when DRY_RUN is False.")
+        require(cfg.get("NOTION_DB_ID"), "NOTION_DB_ID is required when DRY_RUN is False.")
+
+    provider = cfg.get("AI_PROVIDER", "gemini")
+    if provider == "gemini":
+        require(cfg.get("GOOGLE_API_KEY"), "GOOGLE_API_KEY is required for Gemini enrichment.")
+    elif provider == "openai":
+        require(cfg.get("OPENAI_API_KEY"), "OPENAI_API_KEY is required for OpenAI enrichment.")
+    else:
+        errors.append(f"Unknown AI_PROVIDER '{provider}'. Use 'gemini' or 'openai'.")
+
+    if errors:
+        joined = "\n - ".join(errors)
+        raise ConfigError(f"Configuration validation failed:\n - {joined}")
+
 
 def get_config(
     query_term: Optional[str] = None,
@@ -75,7 +110,7 @@ def get_config(
 
     resolved_query = query_term or (tier2_query if tier == 2 else tier1_query)
 
-    return {
+    cfg = {
         "QUERY_TERM": resolved_query,
         "RETMAX": int(retmax) if retmax is not None else 200,
         "RELDATE_DAYS": int(rel_date_days) if rel_date_days is not None else 365,
@@ -91,51 +126,8 @@ def get_config(
         "EUTILS_TOOL": "prefect-litsearch",
         "AI_PROVIDER": os.environ.get("AI_PROVIDER", "gemini").lower(),
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+        "GOOGLE_API_KEY": os.environ.get("GOOGLE_API_KEY", ""),
+        "RUN_LOG_PATH": os.environ.get("RUN_LOG_PATH", "run_history.csv"),
     }
-
-
-def validate_config(cfg: Dict[str, Any], logger=None) -> None:
-    """Strict validation: fail fast if required keys are missing.
-    
-    This prevents 'silent partial runs' where enrichment or Notion writes
-    are silently skipped due to missing credentials.
-    
-    Args:
-        cfg: Configuration dictionary from get_config()
-        logger: Optional Prefect logger for detailed messages
-        
-    Raises:
-        ValueError: If any required credential is missing
-    """
-    errors = []
-    
-    # Required for PubMed access
-    if not cfg.get("EMAIL"):
-        errors.append("NCBI_EMAIL environment variable is required")
-    
-    # Required for Notion writes (unless dry-run)
-    if not cfg.get("DRY_RUN"):
-        if not cfg.get("NOTION_TOKEN"):
-            errors.append("NOTION_TOKEN environment variable is required (or use --dry-run)")
-        if not cfg.get("NOTION_DB_ID"):
-            errors.append("NOTION_DB_ID environment variable is required (or use --dry-run)")
-    
-    # Required for AI enrichment (provider-specific)
-    provider = cfg.get("AI_PROVIDER", "gemini").lower()
-    if provider == "gemini":
-        if not os.environ.get("GOOGLE_API_KEY"):
-            errors.append("GOOGLE_API_KEY environment variable is required for Gemini provider")
-    elif provider == "openai":
-        if not cfg.get("OPENAI_API_KEY"):
-            errors.append("OPENAI_API_KEY environment variable is required for OpenAI provider")
-    else:
-        errors.append(f"Unknown AI_PROVIDER: {provider}. Must be 'gemini' or 'openai'")
-    
-    if errors:
-        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
-        if logger:
-            logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    if logger:
-        logger.info(f"✓ Configuration validated (Provider: {provider}, Dry-run: {cfg.get('DRY_RUN')})")
+    _validate_config(cfg)
+    return cfg
