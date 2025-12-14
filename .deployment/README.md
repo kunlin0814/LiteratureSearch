@@ -1,10 +1,10 @@
 # Admin/Deployment Configuration
 
-## For Regular Users - Ignore This! 👋
+## For Regular Users - Ignore This!
 
 This directory is for **automated deployment setup only**. You don't need anything here to use the literature search pipeline.
 
-👉 **Go to the main [README.md](../README.md)** for usage instructions.
+**Go to the main [README.md](../README.md)** for usage instructions.
 
 ---
 

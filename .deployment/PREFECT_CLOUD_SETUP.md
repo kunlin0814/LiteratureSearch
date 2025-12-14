@@ -133,7 +133,7 @@ python biweekly_flow.py --max-results 25 --max-retries 3
 -  3 users
 -  Unlimited deployments
 
-Your biweekly schedule = **~2 runs/month** = Well within free tier! 🎉
+Your biweekly schedule = **~2 runs/month** = Well within free tier!
 
 ---
 
