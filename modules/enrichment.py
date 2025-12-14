@@ -8,7 +8,15 @@ from google.api_core.exceptions import ResourceExhausted
 import google.generativeai as genai
 from prefect import task, get_run_logger
 
+# Module-level API client initialization (reused across all calls)
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+
+# Initialize OpenAI client if available (lazy import to avoid hard dependency)
+try:
+    from openai import OpenAI
+    _OPENAI_CLIENT = OpenAI(api_key=os.environ.get("OPENAI_API_KEY")) if os.environ.get("OPENAI_API_KEY") else None
+except ImportError:
+    _OPENAI_CLIENT = None
 
 
 # Common prompt template used by both providers
@@ -181,10 +189,9 @@ def _call_gemini_api(user_prompt: str, logger) -> Dict[str, Any]:
 
 def _call_openai_api(user_prompt: str, logger, model_name: str = "gpt-5-nano") -> Dict[str, Any]:
     """Call OpenAI Chat Completions API with strict schema enforcement."""
-    from openai import OpenAI
-    
-    # Fail-fast if API key is missing
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    # Use module-level client (reused across all calls)
+    if _OPENAI_CLIENT is None:
+        raise ValueError("OpenAI client not initialized. Check OPENAI_API_KEY environment variable.")
     
     # Define strict JSON schema matching Gemini's response_schema
     json_schema = {
@@ -236,7 +243,7 @@ def _call_openai_api(user_prompt: str, logger, model_name: str = "gpt-5-nano") -
     }
     
     # Build API parameters
-    params = {
+    params: Dict[str, Any] = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": SYSTEM_INSTRUCTION},
@@ -252,7 +259,7 @@ def _call_openai_api(user_prompt: str, logger, model_name: str = "gpt-5-nano") -
     if not model_name.startswith("gpt-5"):
         params["temperature"] = 0.1
     
-    response = client.chat.completions.create(**params)
+    response = _OPENAI_CLIENT.chat.completions.create(**params)
     
     raw_json = response.choices[0].message.content
     output_tokens = response.usage.completion_tokens
