@@ -7,6 +7,13 @@ Uses Prefect 3.x deployment API.
 """
 
 if __name__ == "__main__":
+    import sys
+    import os
+    
+    # Add .deployment directory to path so we can import biweekly_flow
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, script_dir)
+    
     # Import the biweekly wrapper flow
     from biweekly_flow import biweekly_literature_search_flow
     from prefect.client.schemas.schedules import CronSchedule
