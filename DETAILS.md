@@ -11,7 +11,7 @@ For a short “how to use it” overview, see `README.md`.
 
 ---
 
-## 🎯 High-Level Overview
+## High-Level Overview
 
 This pipeline automates discovery, enrichment, and organization of literature for:
 
@@ -28,7 +28,7 @@ It:
 
 ---
 
-## 🔭 Search Strategy – Tiered Queries
+## Search Strategy – Tiered Queries
 
 The pipeline supports a **two-tier search strategy** controlled by CLI:
 
@@ -72,7 +72,7 @@ so Tier 2 output can be filtered downstream.
 
 ---
 
-## 🏗️ Pipeline Architecture
+## Pipeline Architecture
 
 ```text
 PubMed eSearch
@@ -100,7 +100,7 @@ All steps are orchestrated with **Prefect 3** tasks and flow:
 
 ---
 
-## 📚 PubMed Integration
+## PubMed Integration
 
 ### E-Utilities Usage
 
@@ -153,7 +153,7 @@ Two main validations:
 
 ---
 
-## 🧪 Record Normalization
+## Record Normalization
 
 `normalize_records` merges eSummary and eFetch outputs into a single dict per article:
 
@@ -184,7 +184,7 @@ A **`DedupeKey`** is assigned:
 
 ---
 
-## 🤖 AI Enrichment (Multi-Provider Support)
+## AI Enrichment (Multi-Provider Support)
 
 ### Supported Providers
 
@@ -323,7 +323,7 @@ Gemini runs with **low temperature (≈0.1)** and enforced `response_schema` to 
 
 ---
 
-## 🧬 DataTypes Controlled Vocabulary
+## DataTypes Controlled Vocabulary
 
 `DataTypes` from Gemini are normalized to a controlled lowercase vocabulary. Current core set:
 
@@ -343,7 +343,7 @@ Logic:
 
 ---
 
-## 🧼 XML Sanitization
+## XML Sanitization
 
 Before sending to Gemini:
 
@@ -358,7 +358,7 @@ If XML parsing fails, the original XML string is used as a fallback rather than 
 
 ---
 
-## 🗄️ Notion Database Setup
+## Notion Database Setup
 
 ### Required Properties
 
@@ -409,7 +409,7 @@ To avoid 400 errors:
 
 ---
 
-## ⚙️ Configuration Reference
+## Configuration Reference
 
 Key configuration variables (from code + `.env` + CLI):
 
@@ -431,7 +431,7 @@ Key configuration variables (from code + `.env` + CLI):
 
 ---
 
-## 🗓️ Scheduling & Automation
+## Scheduling & Automation
 
 ### Automated Biweekly Execution (Prefect Cloud)
 
@@ -468,7 +468,7 @@ python literature_flow.py --tier 1 --retmax 50
 0 6 * * 1 cd /path/to/API_WF && python literature_flow.py --tier 1 >> run.log 2>&1
 ```
 
-## 🚨 Error Handling & Retries
+## Error Handling & Retries
 
 - **Requests session**:
   - Automatic retries with backoff for HTTP 429 and 5xx from NCBI/Notion.
@@ -483,7 +483,7 @@ python literature_flow.py --tier 1 --retmax 50
 
 ---
 
-## 💰 API Cost Estimates (Free Tier)
+## API Cost Estimates (Free Tier)
 
 Approximate usage under typical academic settings:
 
@@ -500,7 +500,7 @@ For normal PCa/spatial search frequency (weekly/biweekly), this is effectively *
 
 ---
 
-## 🧭 Gold-Set Strategy
+## Gold-Set Strategy
 
 Maintaining a gold set is strongly recommended:
 
@@ -521,7 +521,7 @@ Revisit:
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -550,7 +550,7 @@ Revisit:
 
 ---
 
-## 🔄 Future Extensions
+## Future Extensions
 
 Possible next steps (if you feel like extending it):
 
@@ -561,7 +561,7 @@ Possible next steps (if you feel like extending it):
 
 ---
 
-## 📚 References
+## References
 
 - [NCBI E-Utilities Documentation](https://www.ncbi.nlm.nih.gov/books/NBK25501/)  
 - [Gemini API Documentation](https://ai.google.dev/docs)  
